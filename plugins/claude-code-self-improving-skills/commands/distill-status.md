@@ -18,6 +18,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/distill_cli.py" status
 `blocked` 만 요약하면 사용자는 영영 듣지 못합니다. `{"error": ...}` 형태로 나오면
 링크 탐지 자체가 실패한 것이니 "링크 없음"으로 옮기지 말고 그 오류를 그대로 전하세요.
 
+최상위 `candidates` 의 `count` 가 0 이 아니면 **함께 알리세요.** 백그라운드 증류가 만들려던
+새 스킬 중 라이브러리 상한(`SIS_MAX_LEARNED_SKILLS`)이나 기존 스킬과의 중복 게이트에 걸린
+것이 `path` 아래 `<이름>/SKILL.md` 로 보관돼 있습니다. 이름을 나열하고, 사용자에게
+살릴 것(기존 스킬에 병합하거나 직접 설치)과 버릴 것을 물어보세요 — 자동으로 설치하지 마세요.
+
 자주 나오는 상태:
 
 - `authentication_required` — 워커가 CLI 인증을 못 씁니다. 사용자가 `claude setup-token`

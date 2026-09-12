@@ -100,6 +100,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     except OSError as exc:
         symlinked = {"error": "could not scan the skill tree: {0}".format(exc)}
 
+    # New skills the guard refused (library cap, near-duplicate) are parked
+    # here rather than dropped; a human decides whether any deserves a place.
+    tray = skill_guard.candidates_dir()
+    try:
+        parked = sorted(
+            entry for entry in os.listdir(tray)
+            if os.path.isdir(os.path.join(tray, entry))
+        ) if os.path.isdir(tray) else []
+    except OSError:
+        parked = []
+
     _print(
         {
             "mode": (os.environ.get("SIS_REVIEW_MODE") or "background"),
@@ -109,6 +120,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "worker_running": queue.worker_alive(),
             "blocked": problems,
             "symlinked": symlinked,
+            "candidates": {"count": len(parked), "path": tray, "names": parked[:20]},
             "last_failure": status["last_failure"],
         }
     )

@@ -320,6 +320,97 @@ def test_the_provenance_stamp_rechecks_a_new_skill_as_new(guard, sandbox, monkey
     assert seen == [True]
 
 
+# --- the duplicate gate and the library cap ------------------------------------
+
+PROV = ("---\nname: {0}\ndescription: {1}\nmetadata:\n"
+        "  provenance: self-improving-skills\n---\nbody\n")
+
+
+def _tray(sandbox):
+    return sandbox.home / ".claude" / "self-improve" / "candidates"
+
+
+def test_a_new_skill_too_similar_to_an_existing_one_is_not_installed(guard, sandbox):
+    sandbox.make_skill("verify-the-fix-actually-ran", PROV.format("verify-the-fix-actually-ran", "Prove the fix ran"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "verify-the-fix-ran" / "SKILL.md",
+           PROV.format("verify-the-fix-ran", "Prove that the fix really ran"))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert report["rolled_back"][0]["reason"].startswith("too_similar_to:verify-the-fix-actually-ran@")
+    assert not (sandbox.skills / "verify-the-fix-ran" / "SKILL.md").exists()
+
+
+def test_the_rejected_duplicate_keeps_its_content_in_the_candidate_tray(guard, sandbox):
+    sandbox.make_skill("live-ui-probing", PROV.format("live-ui-probing", "probe the live ui"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    text = PROV.format("live-ui-probe", "probe the live ui once more")
+    _write(sandbox.skills / "live-ui-probe" / "SKILL.md", text)
+    report = guard.verify(before)
+    parked = _tray(sandbox) / "live-ui-probe" / "SKILL.md"
+    assert parked.read_text(encoding="utf-8") == text
+    assert report["candidates"] == [{"name": "live-ui-probe",
+                                     "reason": report["rolled_back"][0]["reason"],
+                                     "path": str(parked)}]
+    # A second refusal with different bytes does not overwrite the first.
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "live-ui-probe" / "SKILL.md", text + "changed\n")
+    guard.verify(before)
+    assert parked.read_text(encoding="utf-8") == text
+    assert len(list((_tray(sandbox) / "live-ui-probe").iterdir())) == 2
+
+
+def test_the_duplicate_gate_only_looks_at_the_pre_run_library(guard, sandbox):
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    # Two brand-new siblings written in the same run: neither was in the
+    # baseline, so neither is refused for resembling the other.
+    _write(sandbox.skills / "alpha-beta-gamma" / "SKILL.md", PROV.format("alpha-beta-gamma", "one"))
+    _write(sandbox.skills / "alpha-beta-delta" / "SKILL.md", PROV.format("alpha-beta-delta", "two"))
+    report = guard.verify(before)
+    assert sorted(item["name"] for item in report["installed"]) == ["alpha-beta-delta", "alpha-beta-gamma"]
+
+
+def test_a_patch_to_an_existing_skill_is_never_a_duplicate(guard, sandbox):
+    sandbox.make_skill("live-ui-probing", PROV.format("live-ui-probing", "probe the live ui"))
+    sandbox.make_skill("live-ui-probe", PROV.format("live-ui-probe", "probe the live ui too"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "live-ui-probe" / "SKILL.md",
+           PROV.format("live-ui-probe", "probe the live ui too") + "\nmore\n")
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["live-ui-probe"]
+    assert "candidates" not in report
+
+
+def test_a_new_skill_is_refused_when_the_library_is_full(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "2")
+    sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))
+    sandbox.make_skill("other-thing", PROV.format("other-thing", "second"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "third-thing" / "SKILL.md", PROV.format("third-thing", "third"))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert report["rolled_back"][0]["reason"] == "library_full:2/2"
+    assert (_tray(sandbox) / "third-thing" / "SKILL.md").exists()
+
+
+def test_the_library_cap_does_not_block_patching(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "1")
+    sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "one-thing" / "SKILL.md", PROV.format("one-thing", "first") + "\nmore\n")
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["one-thing"]
+
+
+def test_user_authored_skills_do_not_count_toward_the_cap(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "1")
+    sandbox.make_skill("hand-made")  # no provenance marker
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "fresh-thing" / "SKILL.md", PROV.format("fresh-thing", "new"))
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["fresh-thing"]
+
+
 # --- telemetry --------------------------------------------------------------
 
 def test_an_installed_skill_is_counted_once(guard, sandbox, store_data):

@@ -80,6 +80,14 @@ def int_env(name, default):
         return default
 
 
+def float_env(name, default):
+    """Like int_env, for the similarity thresholds."""
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def personal_skills_root():
     return os.path.join(user_home(), ".claude", "skills")
 

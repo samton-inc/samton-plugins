@@ -56,6 +56,12 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tu
 import sis_io
 import skill_guard
 import skill_paths
+import skill_similarity
+
+try:
+    import usage_store
+except Exception:  # pragma: no cover - telemetry is best-effort
+    usage_store = None
 from distill_queue import (
     RETENTION_DAYS,
     DistillQueue,
@@ -1525,6 +1531,33 @@ def process_job(
 BASELINE_INDEX = "index.json"
 
 
+def _prompt_context(job: Dict[str, Any], evidence: Evidence) -> Dict[str, Any]:
+    """The library-aware sections of the distillation prompt: the skills the
+    transcript talks about most (its patch targets) and whether the library
+    is at its cap. Best-effort — a failure here degrades to the plain prompt,
+    never to a failed job."""
+    try:
+        records: Dict[str, Any] = {}
+        if usage_store is not None:
+            try:
+                records = usage_store.all_records()
+            except Exception:
+                records = {}
+        inventory = skill_similarity.read_inventory(records=records)
+        text = "{0}\n{1}".format(evidence.text, job.get("last_assistant_message") or "")
+        count = skill_similarity.learned_count(inventory)
+        cap = skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+        return {
+            "neighbours": skill_similarity.relevant_to_text(
+                text, inventory, limit=skill_paths.int_env("SIS_PROMPT_NEIGHBOURS", 15)),
+            "library_full": cap > 0 and count >= cap,
+            "library_count": count,
+            "library_cap": cap,
+        }
+    except Exception:
+        return {}
+
+
 def _job_baseline(baseline_dir: Path) -> skill_guard.Snapshot:
     """The pre-run state of the skill tree, captured once per job.
 
@@ -1629,7 +1662,10 @@ def _run_job(
         queue.set_cli_version(job_id, owner, cli_version_used)
 
     command = build_claude_command(claude_bin, model=model)
-    prompt = build_curate_prompt(job) if curating else build_prompt(job, evidence)
+    if curating:
+        prompt = build_curate_prompt(job)
+    else:
+        prompt = build_prompt(job, evidence, **_prompt_context(job, evidence))
     deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
 
     def heartbeat() -> bool:
@@ -1852,6 +1888,16 @@ def _merge_guard(
         # A consolidation pass archives what it merged away; surfacing it keeps
         # the job record honest about what left the live tree.
         merged["archived"] = sorted({item["name"] for item in guard["archived"]})
+    guard_candidates = guard.get("candidates") or []
+    if guard_candidates:
+        # A new skill the cap or the duplicate gate refused is not lost: its
+        # content sits in the candidates tray and the job says so, alongside
+        # whatever the child itself chose to return as a candidate.
+        merged["candidates"] = list(merged.get("candidates") or []) + [
+            {"name": item["name"], "reason": item["reason"],
+             "proposed_change": "quarantined at {0}".format(item.get("path") or "(unsaved)")}
+            for item in guard_candidates
+        ]
     # "A change here could not have been reverted" is the one finding the
     # caller blocks the job on.
     if guard.get("unprotected"):
@@ -1866,11 +1912,18 @@ def _merge_guard(
         and not merged.get("archived")
         and merged["status"] == "changed"
     ):
-        merged["status"] = "nothing_to_save"
-        merged["summary"] = (
-            "The run reported changes but nothing survived validation. "
-            + str(merged.get("summary") or "")
-        )[:4000]
+        if guard_candidates:
+            merged["status"] = "candidate"
+            merged["summary"] = (
+                "Nothing was installed; the guard parked {0} new skill(s) as candidates. "
+                .format(len(guard_candidates)) + str(merged.get("summary") or "")
+            )[:4000]
+        else:
+            merged["status"] = "nothing_to_save"
+            merged["summary"] = (
+                "The run reported changes but nothing survived validation. "
+                + str(merged.get("summary") or "")
+            )[:4000]
     if denials:
         merged["summary"] = "{0} [denied: {1}]".format(
             merged.get("summary") or "", ", ".join(sorted(set(denials)))

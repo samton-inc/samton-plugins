@@ -614,3 +614,62 @@ def test_the_prompt_forbids_new_skills_when_the_library_is_full(worker, tmp_path
     assert "The library is at its cap" in prompt
     assert "holds 120 learned skills; the cap is 100" in prompt
     assert "Do NOT create a new skill" in prompt
+
+
+# --- the gate, end to end --------------------------------------------------------
+
+PROV_SKILL = ("---\nname: {0}\ndescription: {1}\nmetadata:\n"
+              "  provenance: self-improving-skills\n---\nbody\n")
+
+
+def test_a_child_that_writes_a_near_duplicate_gets_a_candidate_not_a_skill(worker, queue, sandbox, tmp_path):
+    skills = sandbox.skills
+    sandbox.make_skill("verify-the-fix-actually-ran",
+                       PROV_SKILL.format("verify-the-fix-actually-ran", "Prove the fix ran"))
+    claude = _fake_claude(tmp_path, textwrap.dedent("""\
+        import json, pathlib
+        target = pathlib.Path({0!r}) / "verify-the-fix-ran" / "SKILL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text({1!r}, encoding="utf-8")
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "changed",
+                            "skills": [{{"name": "verify-the-fix-ran", "action": "created"}}],
+                            "candidates": [], "summary": "made one"}}}}))
+        """).format(str(skills), PROV_SKILL.format("verify-the-fix-ran", "Prove that the fix ran")))
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    _enqueue(queue, transcript, 2)
+    _run(worker, queue, claude)
+    job = queue.list_jobs()[0]
+    assert job["status"] == "done"
+    assert not (skills / "verify-the-fix-ran" / "SKILL.md").exists()
+    assert job["result"]["status"] == "candidate"
+    assert job["result"]["skills"] == []
+    candidate = job["result"]["candidates"][0]
+    assert candidate["name"] == "verify-the-fix-ran"
+    assert candidate["reason"].startswith("too_similar_to:verify-the-fix-actually-ran@")
+    tray = sandbox.home / ".claude" / "self-improve" / "candidates" / "verify-the-fix-ran" / "SKILL.md"
+    assert tray.exists() and candidate["proposed_change"] == "quarantined at {0}".format(tray)
+
+
+def test_the_child_is_told_which_existing_skills_are_nearest(worker, queue, sandbox, tmp_path):
+    sandbox.make_skill("captcha-retry-budget",
+                       PROV_SKILL.format("captcha-retry-budget", "Use this when a captcha keeps failing and retries are counted"))
+    sandbox.make_skill("window-resize", PROV_SKILL.format("window-resize", "Use this when the window is too narrow"))
+    captured = tmp_path / "captured.txt"
+    claude = _fake_claude(tmp_path, textwrap.dedent("""\
+        import json
+        from pathlib import Path
+        Path({0!r}).write_text(_stdin, encoding="utf-8")
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "nothing_to_save", "skills": [],
+                                                "candidates": [], "summary": "-"}}}}))
+        """).format(str(captured)))
+    rows = _chain("user", "assistant")
+    rows[-1]["message"]["content"] = "the captcha kept failing and every retry was counted against us"
+    transcript = _transcript(tmp_path / "t.jsonl", rows)
+    _enqueue(queue, transcript, len(rows))
+    _run(worker, queue, claude)
+    delivered = captured.read_text(encoding="utf-8")
+    assert "patch targets" in delivered
+    assert delivered.index("- captcha-retry-budget (body") < delivered.rindex("BEGIN_SIS_UNTRUSTED_EVIDENCE_")
+    assert "- window-resize (body" not in delivered  # nothing in the transcript mentions it

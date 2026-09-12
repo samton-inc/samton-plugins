@@ -35,6 +35,7 @@ import stat
 from typing import Any, Dict, List, Optional, Set
 
 import skill_paths
+import skill_similarity
 import validate_skill
 
 try:
@@ -307,6 +308,86 @@ def _description_of(text: Optional[str]) -> Optional[str]:
     return validate_skill._scalar(fm, "description") or ""
 
 
+def _baseline_inventory(before: "Snapshot") -> List[skill_similarity.SkillFacts]:
+    """The library as it stood BEFORE the run, read from the snapshot store.
+
+    The live tree already holds this run's writes, so judging a new skill
+    against it would compare the skill with itself. Only direct children of
+    the root count, and `.archive/` is skipped, matching `read_inventory`.
+    """
+    records: Dict[str, Any] = {}
+    if usage_store is not None:
+        try:
+            records = usage_store.all_records()
+        except Exception:
+            records = {}
+    inventory: List[skill_similarity.SkillFacts] = []
+    archive_root = os.path.join(before.root, ".archive") + os.sep
+    for path in sorted(before.files):
+        if os.path.basename(path) != "SKILL.md" or path.startswith(archive_root):
+            continue
+        owner = _owning_skill(path, before.root)
+        if owner is None or os.path.dirname(path) != owner:
+            continue  # nested under references/ or the like: not a skill
+        text = _decode(before.original(path))
+        if text is None:
+            continue
+        name = skill_paths.skill_name(path)
+        inventory.append(skill_similarity.facts_from_text(name, text, records.get(name)))
+    return inventory
+
+
+def _new_skill_gate(name: str, text: str, inventory: List[skill_similarity.SkillFacts]) -> Optional[str]:
+    """Why a structurally valid NEW skill still must not be installed, or None.
+
+    Two deterministic checks the prompt used to ask for in prose:
+      library_full      the library already holds SIS_MAX_LEARNED_SKILLS
+                        learned skills (default 100) — patch or candidate only
+      too_similar_to    an existing skill's name or description overlaps this
+                        one past SIS_DUP_NAME_JACCARD / SIS_DUP_DESC_JACCARD
+    The skill just written is not in the pre-run inventory, so it cannot be its
+    own match; a skill the same run PATCHED still counts — "patch foo and add
+    foo-v2" is exactly the shape this gate exists to catch.
+    """
+    cap = skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+    count = skill_similarity.learned_count(inventory)
+    if cap > 0 and count >= cap:
+        return "library_full:{0}/{1}".format(count, cap)
+    hit = skill_similarity.duplicate_of(
+        name, skill_similarity.frontmatter_description(text), inventory,
+        name_threshold=skill_paths.float_env("SIS_DUP_NAME_JACCARD", 0.5),
+        desc_threshold=skill_paths.float_env("SIS_DUP_DESC_JACCARD", 0.4))
+    if hit is not None:
+        other, score, kind = hit
+        return "too_similar_to:{0}@{1}({2})".format(other, score, kind)
+    return None
+
+
+def candidates_dir() -> str:
+    """Where a refused new skill keeps its content for a human to look at."""
+    return os.path.join(skill_paths.state_dir(), "candidates")
+
+
+def _quarantine(name: str, data: Optional[bytes]) -> Optional[str]:
+    """Park a refused new SKILL.md under the candidates tray instead of losing
+    it. Same name with the same bytes is idempotent; different bytes go to a
+    digest-suffixed sibling so no earlier candidate is overwritten."""
+    if not data:
+        return None
+    try:
+        folder = os.path.join(candidates_dir(), name)
+        os.makedirs(folder, exist_ok=True)
+        target = os.path.join(folder, "SKILL.md")
+        existing = _read(target)
+        if existing is not None and existing != data:
+            target = os.path.join(folder, "SKILL-{0}.md".format(_digest(data)[:8]))
+        with open(target, "wb") as handle:
+            handle.write(data)
+        return target
+    except OSError:
+        return None
+
+
 def _has_valid_skill(owner: str) -> bool:
     """Whether the directory currently holds a SKILL.md that passes validation."""
     text = _decode(_read(os.path.join(owner, "SKILL.md")))
@@ -344,6 +425,8 @@ def verify(before: Snapshot) -> Dict[str, Any]:
                            when the run created it)
       assets               accepted non-SKILL.md files (references/, scripts/)
       rolled_back          files reverted (invalid, pinned, loose, or escaped)
+      candidates           new skills refused by the library cap or the
+                           duplicate gate, parked under the candidates tray
       unprotected          paths the guard could not have reverted
 
     Nothing outside the skill tree is observed (see the module docstring).
@@ -360,6 +443,13 @@ def verify(before: Snapshot) -> Dict[str, Any]:
     assets: List[str] = []
     rolled_back: List[Dict[str, str]] = []
     unprotected: List[str] = []
+    candidates: List[Dict[str, str]] = []
+    baseline_inventory: List[List[skill_similarity.SkillFacts]] = []  # memo, built once
+
+    def inventory() -> List[skill_similarity.SkillFacts]:
+        if not baseline_inventory:
+            baseline_inventory.append(_baseline_inventory(before))
+        return baseline_inventory[0]
 
     after = Snapshot(root, before.home).capture()
     changed = sorted(
@@ -464,6 +554,14 @@ def verify(before: Snapshot) -> Dict[str, Any]:
                 previous_description=_description_of(previous_text) if existed else None)
             if problems:
                 reason = "invalid: " + "; ".join(problems)
+            elif not existed:
+                # Structurally fine and brand new: the library-cap and
+                # near-duplicate checks decide whether it may join the library.
+                gate = _new_skill_gate(name, current_text, inventory())
+                if gate is not None:
+                    reason = gate
+                    parked = _quarantine(name, current_bytes)
+                    candidates.append({"name": name, "reason": gate, "path": parked or ""})
 
         if reason is None:
             installed.append({"name": name, "path": path, "new": not existed})
@@ -501,6 +599,8 @@ def verify(before: Snapshot) -> Dict[str, Any]:
         "assets": sorted(assets),
         "rolled_back": rolled_back,
     }
+    if candidates:
+        report["candidates"] = candidates
     if archived:
         report["archived"] = archived
     if unprotected:
