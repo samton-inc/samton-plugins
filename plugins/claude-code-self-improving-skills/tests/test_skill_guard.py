@@ -270,6 +270,56 @@ def test_a_stamp_that_breaks_a_skill_is_undone(guard, sandbox, monkeypatch):
         encoding="utf-8") == GOOD.format("fragile")
 
 
+# --- size caps for new skills ------------------------------------------------
+
+def test_a_new_skill_with_an_oversized_description_is_not_installed(guard, sandbox):
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "verbose" / "SKILL.md",
+           "---\nname: verbose\ndescription: {0}\n---\nbody\n".format("x" * 400))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert report["rolled_back"][0]["name"] == "verbose"
+    assert report["rolled_back"][0]["reason"].startswith("invalid:")
+    assert not (sandbox.skills / "verbose" / "SKILL.md").exists()
+
+
+def test_an_existing_skill_keeps_its_oversized_description_when_patched(guard, sandbox):
+    long_desc = "---\nname: legacy\ndescription: {0}\n---\nbody\n".format("x" * 400)
+    sandbox.make_skill("legacy", long_desc)
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "legacy" / "SKILL.md", long_desc + "\nmore body\n")
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["legacy"]
+    assert report["installed"][0]["new"] is False
+
+
+def test_an_existing_skill_cannot_grow_an_oversized_description(guard, sandbox):
+    tmpl = "---\nname: legacy\ndescription: {0}\n---\nbody\n"
+    sandbox.make_skill("legacy", tmpl.format("x" * 400))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "legacy" / "SKILL.md", tmpl.format("x" * 500))
+    report = guard.verify(before)
+    assert report["installed"] == []
+    assert (sandbox.skills / "legacy" / "SKILL.md").read_text(encoding="utf-8").count("x" * 400) == 1
+
+
+def test_the_provenance_stamp_rechecks_a_new_skill_as_new(guard, sandbox, monkeypatch):
+    import validate_skill
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "fresh" / "SKILL.md", GOOD.format("fresh"))
+    report = guard.verify(before)
+    seen = []
+    real = validate_skill._validate
+
+    def _spy(text, **kwargs):
+        seen.append(kwargs.get("is_new"))
+        return real(text, **kwargs)
+
+    monkeypatch.setattr(validate_skill, "_validate", _spy)
+    guard.stamp_provenance(report["installed"])
+    assert seen == [True]
+
+
 # --- telemetry --------------------------------------------------------------
 
 def test_an_installed_skill_is_counted_once(guard, sandbox, store_data):

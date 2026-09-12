@@ -296,6 +296,17 @@ def _is_pinned(name: str, previous_text: Optional[str]) -> bool:
     return False
 
 
+def _description_of(text: Optional[str]) -> Optional[str]:
+    """The frontmatter description of a SKILL.md text, "" when the file has
+    frontmatter but no description, None when there is no frontmatter."""
+    if text is None:
+        return None
+    fm, _body = validate_skill._split_frontmatter(text)
+    if fm is None:
+        return None
+    return validate_skill._scalar(fm, "description") or ""
+
+
 def _has_valid_skill(owner: str) -> bool:
     """Whether the directory currently holds a SKILL.md that passes validation."""
     text = _decode(_read(os.path.join(owner, "SKILL.md")))
@@ -329,7 +340,8 @@ def verify(before: Snapshot) -> Dict[str, Any]:
     """Re-check the skill tree after the child ran; revert anything unsafe.
 
     Returns a report the worker merges into the job result:
-      installed            skills whose new SKILL.md passed validation
+      installed            skills whose SKILL.md passed validation ("new": True
+                           when the run created it)
       assets               accepted non-SKILL.md files (references/, scripts/)
       rolled_back          files reverted (invalid, pinned, loose, or escaped)
       unprotected          paths the guard could not have reverted
@@ -445,12 +457,16 @@ def verify(before: Snapshot) -> Dict[str, Any]:
             # skill that later edits are then blocked from fixing.
             reason = "pinned"
         else:
-            problems = validate_skill._validate(current_text)
+            # A brand-new skill is held to the 0.18.0 caps; an existing one
+            # only to "don't grow an over-cap description" (see _validate).
+            problems = validate_skill._validate(
+                current_text, is_new=not existed,
+                previous_description=_description_of(previous_text) if existed else None)
             if problems:
                 reason = "invalid: " + "; ".join(problems)
 
         if reason is None:
-            installed.append({"name": name, "path": path})
+            installed.append({"name": name, "path": path, "new": not existed})
             continue
         if owner:
             rejected_skills[owner] = reason
@@ -567,5 +583,7 @@ def stamp_provenance(installed: List[Dict[str, str]]) -> None:
         except Exception:
             continue
         stamped = _decode(_read(path))
-        if stamped is None or validate_skill._validate(stamped):
+        # Re-checked under the same rule set the install was judged by: a new
+        # skill stays a new skill for the caps even after the stamp.
+        if stamped is None or validate_skill._validate(stamped, is_new=bool(item.get("new"))):
             _restore(path, original)
