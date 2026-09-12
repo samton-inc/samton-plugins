@@ -31,9 +31,14 @@ sibling dev-log hook (which never fired across 396 real transcripts):
   * Any error fails safe to APPROVE — the hook must never wedge a session shut.
 
 Config:
-  SIS_DISTILL_THRESHOLD  tool calls since last distill required to nudge (default 12)
+  SIS_DISTILL_THRESHOLD  tool calls since last distill required to nudge (default 40)
   SIS_MIN_FILE_EDITS     min real file edits (Edit/Write/MultiEdit/NotebookEdit)
-                         since last distill, so pure read/search turns don't nudge (default 2)
+                         since last distill, so pure read/search turns don't nudge (default 3)
+  SIS_DISTILL_READONLY_THRESHOLD  edit-free segments nudge past this many calls (default 80)
+
+The 0.18.0 defaults are three to four times the originals (12 / 2 / 24): at
+those, 92% of 378 background runs wrote a skill and the library grew by ~10 a
+day. A nudge is now for a segment of work large enough to have taught something.
 """
 
 import json
@@ -419,8 +424,8 @@ def main():
     if not path or not os.path.isfile(path):
         approve()
 
-    threshold = _int_env("SIS_DISTILL_THRESHOLD", 12)
-    min_edits = _int_env("SIS_MIN_FILE_EDITS", 2)
+    threshold = _int_env("SIS_DISTILL_THRESHOLD", 40)
+    min_edits = _int_env("SIS_MIN_FILE_EDITS", 3)
 
     rows = []
     try:
@@ -519,7 +524,7 @@ def main():
     #       actual PR is opt-in and human-gated via /propose-plugin-improvement.
     nudge_fires = total_calls >= threshold and file_edits >= min_edits
     readonly_fires = (file_edits == 0
-                      and total_calls >= _int_env("SIS_DISTILL_READONLY_THRESHOLD", 24))
+                      and total_calls >= _int_env("SIS_DISTILL_READONLY_THRESHOLD", 80))
     # core_touched has no threshold of its own: a one-line edit to the plugin
     # source trips it. That is fine for an advisory the agent reads, but as a
     # background trigger it would spawn a session on every single turn spent

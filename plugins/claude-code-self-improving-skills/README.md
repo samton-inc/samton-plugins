@@ -49,9 +49,9 @@ skill-distiller 서브에이전트 (격리 컨텍스트)
 | `SIS_CLAUDE_BIN` | 자동탐색 | `claude` 절대경로. GUI 로 뜬 훅은 PATH 에 `~/.local/bin` 이 없을 수 있어 필요할 때가 있음 |
 | `SIS_CORE_TOUCH_MIN_CALLS` | `6` | 코어 소스 편집(L1 권고)이 백그라운드 증류를 유발하려면 필요한 최소 도구 호출 수. 이게 없으면 이 리포에서 한 줄만 고쳐도 매 턴 세션이 뜸 |
 | `SIS_STATE_DIR` | `~/.claude/self-improve` | 큐·백업·텔레메트리를 전부 옮김 |
-| `SIS_DISTILL_THRESHOLD` | `12` | 증류 nudge를 띄울, 마지막 증류 이후 누적 도구 호출 수 |
-| `SIS_MIN_FILE_EDITS` | `2` | nudge 조건: 마지막 증류 이후 실제 파일 편집(Edit/Write/MultiEdit) 최소 횟수. 순수 탐색·질의 턴은 트리거하지 않게 함 |
-| `SIS_DISTILL_READONLY_THRESHOLD` | `24` | 파일 편집이 **0회**인 구간도 도구 호출이 이 수를 넘으면 nudge — 긴 조사·디버깅 세션의 진단 기법(커맨드 사다리·원인 규명 패턴)이 영원히 증류되지 않는 갭을 막음 (Hermes 는 툴 iteration 만으로 트리거) |
+| `SIS_DISTILL_THRESHOLD` | `40` | 증류 nudge를 띄울, 마지막 증류 이후 누적 도구 호출 수. 0.17.0 의 12 에서 올림 — 그때는 378회 중 92% 가 스킬을 써서 라이브러리가 하루 10개씩 늘었음 |
+| `SIS_MIN_FILE_EDITS` | `3` | nudge 조건: 마지막 증류 이후 실제 파일 편집(Edit/Write/MultiEdit) 최소 횟수. 순수 탐색·질의 턴은 트리거하지 않게 함 |
+| `SIS_DISTILL_READONLY_THRESHOLD` | `80` | 파일 편집이 **0회**인 구간도 도구 호출이 이 수를 넘으면 nudge — 긴 조사·디버깅 세션의 진단 기법(커맨드 사다리·원인 규명 패턴)이 영원히 증류되지 않는 갭을 막음 (Hermes 는 툴 iteration 만으로 트리거) |
 | `SIS_DISTILLER_MODEL` | (없음) | 증류를 **계정 기본 모델이 아닌 특정 티어**로 돌리고 싶을 때만 지정(예: `sonnet`). 미설정이면 자식에 `--model` 을 넘기지 않아 계정이 지금 쓰는 모델을 그대로 물려받습니다. foreground 모드에서는 nudge·/distill-skill 이 distiller 호출에 `model="<값>"` 을 포함하라고 안내하는 용도로도 쓰입니다(`haiku` 값은 무시 — 서브에이전트 Haiku 금지 정책) |
 | `SIS_CURATE_MIN_SKILLS` | `8` | 자동 큐레이션을 시작하는 학습 스킬 수 |
 | `SIS_CURATE_INTERVAL_DAYS` | `7` | 큐레이터 자동 실행 간격(일) |

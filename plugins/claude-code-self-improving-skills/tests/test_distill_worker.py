@@ -577,3 +577,40 @@ def test_is_curate_job_keys_on_the_trigger(worker):
     assert worker.is_curate_job({"trigger": worker.CURATE_TRIGGER}) is True
     assert worker.is_curate_job({"trigger": "signal"}) is False
     assert worker.is_curate_job({}) is False
+
+
+# --- the prompt's stance on creating skills ------------------------------------
+
+def _evidence(worker, tmp_path):
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    return worker.read_evidence(str(transcript), 2)
+
+
+def test_the_prompt_defaults_to_writing_nothing(worker, tmp_path):
+    prompt = worker.build_prompt({"session_id": "s", "prompt_id": "p"}, _evidence(worker, tmp_path))
+    assert "Writing nothing is the default" in prompt
+    assert "300 characters" in prompt and "20,000 characters" in prompt
+    assert "patch targets" not in prompt and "at its cap" not in prompt
+
+
+def test_the_prompt_lists_the_skills_nearest_to_the_transcript(worker, tmp_path):
+    import skill_similarity
+    near = [skill_similarity.facts_from_text(
+        "captcha-retry-budget",
+        "---\nname: captcha-retry-budget\ndescription: Use this when a captcha keeps failing\n---\nbody\n",
+        {"use_count": 2})]
+    prompt = worker.build_prompt({"session_id": "s", "prompt_id": "p"}, _evidence(worker, tmp_path),
+                                 neighbours=near)
+    assert "patch targets" in prompt
+    assert "- captcha-retry-budget (body" in prompt and "used 2x" in prompt
+    assert "why none of the skills listed here could be extended" in prompt
+    # The listing sits before the evidence fence, never inside it.
+    assert prompt.index("patch targets") < prompt.rindex("BEGIN_SIS_UNTRUSTED_EVIDENCE_")
+
+
+def test_the_prompt_forbids_new_skills_when_the_library_is_full(worker, tmp_path):
+    prompt = worker.build_prompt({"session_id": "s", "prompt_id": "p"}, _evidence(worker, tmp_path),
+                                 library_full=True, library_count=120, library_cap=100)
+    assert "The library is at its cap" in prompt
+    assert "holds 120 learned skills; the cap is 100" in prompt
+    assert "Do NOT create a new skill" in prompt

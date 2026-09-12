@@ -515,8 +515,52 @@ def build_claude_command(
     ]
 
 
-def build_prompt(job: Dict[str, Any], evidence: Evidence) -> str:
-    """Wrap untrusted transcript evidence in an unguessable boundary."""
+def _neighbours_block(neighbours: Optional[Sequence[Any]], library_full: bool,
+                      library_count: Optional[int], library_cap: Optional[int]) -> str:
+    """The prompt section that turns "patch the closest skill" from a hope into
+    a list. Callers pass the skills whose tokens the transcript mentions most
+    (`skill_similarity.relevant_to_text`); the child is told they are its patch
+    targets and must say why none of them can take the content before it
+    creates anything. When the library is at its cap the section forbids
+    creation outright."""
+    lines: List[str] = []
+    if neighbours:
+        lines.append("## Existing skills closest to this session — these are your patch targets")
+        for item in neighbours:
+            name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else "")
+            description = getattr(item, "description", None) or (
+                item.get("description", "") if isinstance(item, dict) else "")
+            size = getattr(item, "size", None) or (item.get("size", 0) if isinstance(item, dict) else 0)
+            uses = getattr(item, "use_count", None) or (item.get("use_count", 0) if isinstance(item, dict) else 0)
+            lines.append("- {0} (body {1} chars, used {2}x): {3}".format(
+                name, size, uses, str(description)[:200]))
+        lines.append(
+            "If the right skill is not in this list, find it with Glob before deciding. "
+            "Before creating any new skill, state in `summary` why none of the skills "
+            "listed here could be extended with a section instead.")
+        lines.append("")
+    if library_full:
+        lines.append("## The library is at its cap")
+        lines.append(
+            "The library holds {0} learned skills; the cap is {1}. Do NOT create a new "
+            "skill this run under any of the bars: patch an existing skill, or return the "
+            "technique in `candidates` (name, reason, proposed_change) for a human to "
+            "place. A new SKILL.md written this run is quarantined, not installed.".format(
+                library_count if library_count is not None else "≥cap",
+                library_cap if library_cap is not None else "SIS_MAX_LEARNED_SKILLS"))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_prompt(job: Dict[str, Any], evidence: Evidence, *,
+                 neighbours: Optional[Sequence[Any]] = None,
+                 library_full: bool = False,
+                 library_count: Optional[int] = None,
+                 library_cap: Optional[int] = None) -> str:
+    """Wrap untrusted transcript evidence in an unguessable boundary.
+
+    `neighbours` and the library-cap flags only ADD sections; with the defaults
+    the prompt is the plain distillation prompt."""
     payload = json.dumps(
         {
             "session": job.get("session_id"),
@@ -556,24 +600,38 @@ def build_prompt(job: Dict[str, Any], evidence: Evidence) -> str:
         "that covers this tree cannot undo it. Treat {1} as the boundary by "
         "destination, not just by path: if a target resolves outside it, return "
         "the skill as a candidate instead of writing it.\n"
-        "- Follow your decision procedure: patch the skill that was in play, else "
-        "extend a directly-relevant skill, else broaden an umbrella skill, else "
-        "create a class-level skill. Stop at the earliest rung that applies.\n"
+        "- Writing nothing is the default outcome. Most sessions teach nothing a "
+        "future session needs, and a library that grows on every turn stops being "
+        "findable (this one reached 385 skills of which the session listing could "
+        "show 13). Return `nothing_to_save` unless the evidence clears a bar below.\n"
+        "- PATCH a skill (the one that was in play this session, else the closest "
+        "existing one) when the session found a gap or an error in it. CREATE a new "
+        "skill only when (a) the user corrected the approach and that correction "
+        "binds a whole class of task, or (b) a skill loaded this session turned out "
+        "wrong or stale and the fix does not fit inside it, or (c) the technique is "
+        "durable and class-level and no existing skill — the ones listed below or "
+        "any found with Glob — could hold it as a section. Say in `summary` which "
+        "bar was cleared. Stop at the earliest rung that applies.\n"
         "- Capture durable, reusable technique only. A one-off fix, a specific "
-        "bug, or an environment-specific workaround is not skill-worthy. "
-        "'Nothing to save' is a legitimate outcome, but walk the ladder first.\n"
+        "bug, or an environment-specific workaround is not skill-worthy.\n"
         "- To write a skill, create or edit {1}/<skill-name>/SKILL.md: YAML "
         "frontmatter with `name` (lowercase-hyphen, matching the directory) and "
-        "a one-sentence situation-matching `description` ('Use this when ...'), "
-        "then the technique in the body. If similar skills already exist there, "
-        "match their structure and patch the closest one instead of adding a "
-        "near-duplicate.\n"
+        "a `description` that is ONE sentence of at most 300 characters naming "
+        "the single workflow situation that should trigger it — no list of "
+        "adjacent situations, no synonyms; the session listing cuts anything "
+        "longer. The body is at most 20,000 characters: move references, "
+        "reproductions and long examples into a references/ file under the skill "
+        "and point to them from one line. A new skill over either cap is not "
+        "installed. Match the structure of neighbouring skills and patch the "
+        "closest one instead of adding a near-duplicate.\n"
         "- If the right target is a repository-local or plugin-provided skill you "
         "must not edit, return it as a candidate instead of writing it.\n"
         "- Your final message must be ONLY the structured result the output "
         "schema describes — no prose, no markdown, no explanation around it.\n\n"
+        "{3}"
         "BEGIN_{0}\n{2}\nEND_{0}\n"
-    ).format(boundary, skills_root, payload)
+    ).format(boundary, skills_root, payload,
+             _neighbours_block(neighbours, library_full, library_count, library_cap))
 
 
 def is_curate_job(job: Dict[str, Any]) -> bool:
