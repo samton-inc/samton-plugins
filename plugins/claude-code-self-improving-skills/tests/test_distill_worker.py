@@ -673,3 +673,84 @@ def test_the_child_is_told_which_existing_skills_are_nearest(worker, queue, sand
     assert "patch targets" in delivered
     assert delivered.index("- captcha-retry-budget (body") < delivered.rindex("BEGIN_SIS_UNTRUSTED_EVIDENCE_")
     assert "- window-resize (body" not in delivered  # nothing in the transcript mentions it
+
+
+# --- library passes: one cluster or one batch per job -----------------------------
+
+def _enqueue_library(queue, trigger, group_id, members):
+    prefix = "curator" if trigger == "curate" else "compress"
+    return queue.enqueue(
+        session_id="{0}-{1}".format(prefix, group_id), prompt_id="{0}-20260913".format(trigger),
+        transcript_path="", transcript_rows=0, signal=False, signal_source="session_start",
+        trigger=trigger, payload={"kind": "cluster" if trigger == "curate" else "batch",
+                                  "id": group_id, "members": list(members)})
+
+
+def test_a_cluster_job_prompt_lists_only_its_members(worker, queue, sandbox, tmp_path):
+    for name in ("live-ui-probe", "live-ui-probing", "unrelated-thing"):
+        sandbox.make_skill(name, PROV_SKILL.format(name, "Use this when probing the live ui"))
+    _enqueue_library(queue, "curate", "feedbeef", ["live-ui-probe", "live-ui-probing"])
+    _run(worker, queue, _capturing_claude(tmp_path))
+    prompt = (tmp_path / "prompt.txt").read_text(encoding="utf-8")
+    assert "## This cluster" in prompt
+    assert "- live-ui-probe (SKILL.md" in prompt and "- live-ui-probing (SKILL.md" in prompt
+    assert "unrelated-thing" not in prompt
+    assert "Do not inventory the rest of the library" in prompt
+    assert "at most 300 characters" in prompt and "MANDATORY after archiving" in prompt
+
+
+def test_a_cluster_that_dissolved_completes_with_nothing_to_do(worker, queue, sandbox, tmp_path):
+    sandbox.make_skill("live-ui-probe", PROV_SKILL.format("live-ui-probe", "probe"))
+    # The second member is gone (merged away by an earlier job, say).
+    _enqueue_library(queue, "curate", "feedbeef", ["live-ui-probe", "live-ui-probing"])
+    _run(worker, queue, _capturing_claude(tmp_path))
+    job = queue.list_jobs()[0]
+    assert job["status"] == "done"
+    assert job["result"]["status"] == "nothing_to_save" and "dissolved" in job["result"]["summary"]
+    assert not (tmp_path / "prompt.txt").exists()  # no child was started
+
+
+def _compress_child(tmp_path, skills, name, new_text):
+    return _fake_claude(tmp_path, textwrap.dedent("""\
+        import json, pathlib
+        pathlib.Path({0!r}).joinpath({1!r}, "SKILL.md").write_text({2!r}, encoding="utf-8")
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "changed",
+                            "skills": [{{"name": {1!r}, "action": "description compressed"}}],
+                            "candidates": [], "summary": "compressed"}}}}))
+        """).format(str(skills), name, new_text))
+
+
+def test_a_compress_job_rewrites_descriptions_only(worker, queue, sandbox, tmp_path):
+    long_desc = "Use this when " + "x" * 400
+    original = PROV_SKILL.format("wordy-skill", long_desc)
+    sandbox.make_skill("wordy-skill", original)
+    shorter = original.replace(long_desc, "Use this when the description was too long")
+    _enqueue_library(queue, "compress", "cafe0001", ["wordy-skill"])
+    _run(worker, queue, _compress_child(tmp_path, sandbox.skills, "wordy-skill", shorter))
+    job = queue.list_jobs()[0]
+    assert job["status"] == "done", job.get("error_code")
+    assert [s["name"] for s in job["result"]["skills"]] == ["wordy-skill"]
+    assert (sandbox.skills / "wordy-skill" / "SKILL.md").read_text(encoding="utf-8") == shorter
+
+
+def test_a_compress_child_that_edits_a_body_is_reverted(worker, queue, sandbox, tmp_path):
+    long_desc = "Use this when " + "x" * 400
+    original = PROV_SKILL.format("wordy-skill", long_desc)
+    sandbox.make_skill("wordy-skill", original)
+    tampered = original.replace(long_desc, "Use this when it is short").replace("body\n", "body rewritten\n")
+    _enqueue_library(queue, "compress", "cafe0001", ["wordy-skill"])
+    _run(worker, queue, _compress_child(tmp_path, sandbox.skills, "wordy-skill", tampered))
+    job = queue.list_jobs()[0]
+    assert job["result"]["skills"] == []
+    assert job["result"]["rolled_back"] == ["wordy-skill: compress_touched_body"]
+    assert (sandbox.skills / "wordy-skill" / "SKILL.md").read_text(encoding="utf-8") == original
+
+
+def test_a_compress_batch_skips_skills_already_within_the_cap(worker, queue, sandbox, tmp_path):
+    sandbox.make_skill("short-skill", PROV_SKILL.format("short-skill", "already short"))
+    _enqueue_library(queue, "compress", "cafe0002", ["short-skill"])
+    _run(worker, queue, _capturing_claude(tmp_path))
+    job = queue.list_jobs()[0]
+    assert job["result"]["status"] == "nothing_to_save" and "within the cap" in job["result"]["summary"]
+    assert not (tmp_path / "prompt.txt").exists()

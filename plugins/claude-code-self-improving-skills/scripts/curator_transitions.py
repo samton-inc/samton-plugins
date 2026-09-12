@@ -220,6 +220,9 @@ def mark_curated():
     except Exception:
         pass
     state["last_run"] = time.time()
+    # A manual /curate-skills is a consolidation: it resets the weekly clock
+    # the automatic pass runs on, not just the daily transition clock.
+    state["last_consolidation"] = state["last_run"]
     try:
         rc = int(state.get("run_count", 0))
     except (TypeError, ValueError):

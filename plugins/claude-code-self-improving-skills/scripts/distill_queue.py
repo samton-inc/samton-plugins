@@ -246,6 +246,14 @@ def _as_dict(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
             value["result"] = None
     else:
         value["result"] = None
+    raw_payload = value.pop("payload_json", None)
+    value["payload"] = None
+    if raw_payload:
+        try:
+            parsed = json.loads(raw_payload)
+            value["payload"] = parsed if isinstance(parsed, dict) else None
+        except (TypeError, json.JSONDecodeError):
+            value["payload"] = None
     value["signal"] = bool(value.get("signal"))
     return value
 
@@ -436,6 +444,12 @@ class DistillQueue:
                 );
                 """
             )
+            # 0.18.0: library passes (a consolidation cluster, a compression
+            # batch) carry their member list in the row. Added in place rather
+            # than by recreating the table so an existing queue keeps its rows.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(distill_jobs)")}
+            if "payload_json" not in columns:
+                conn.execute("ALTER TABLE distill_jobs ADD COLUMN payload_json TEXT")
         _secure_sqlite_paths(self.path)
 
     def enqueue(
@@ -451,8 +465,13 @@ class DistillQueue:
         model: Optional[str] = None,
         last_assistant_message: Optional[str] = None,
         cwd: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         session_id = str(session_id or "global")
+        payload_text = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True)[:20_000]
+            if isinstance(payload, dict) and payload else None
+        )
         prompt_id = str(prompt_id or "")
         if not prompt_id:
             # A stable key is still required for exact-turn deduplication.
@@ -531,7 +550,7 @@ class DistillQueue:
                        prompt_id = ?, transcript_path = ?, transcript_rows = ?,
                        last_assistant_message = ?, cwd = ?,
                        signal = ?, signal_source = ?, trigger = ?, model = ?,
-                       updated_at = ?
+                       payload_json = ?, updated_at = ?
                        WHERE id = ?""",
                     (
                         prompt_id,
@@ -543,6 +562,7 @@ class DistillQueue:
                         combined_source,
                         combined_trigger,
                         str(model) if model else pending["model"],
+                        payload_text if payload_text is not None else pending["payload_json"],
                         now,
                         job_id,
                     ),
@@ -566,9 +586,9 @@ class DistillQueue:
                 """INSERT INTO distill_jobs(
                        session_id, prompt_id, transcript_path, transcript_rows,
                        last_assistant_message, cwd,
-                       signal, signal_source, trigger, model,
+                       signal, signal_source, trigger, model, payload_json,
                        status, attempts, available_at, created_at, updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',0,?,?,?)""",
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',0,?,?,?)""",
                 (
                     session_id,
                     prompt_id,
@@ -580,6 +600,7 @@ class DistillQueue:
                     str(signal_source or ""),
                     str(trigger or "unspecified"),
                     str(model) if model else None,
+                    payload_text,
                     now,
                     now,
                     now,

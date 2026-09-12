@@ -57,6 +57,7 @@ import sis_io
 import skill_guard
 import skill_paths
 import skill_similarity
+import validate_skill
 
 try:
     import usage_store
@@ -91,6 +92,9 @@ RUN_DIR_NAME = "distill-runs"
 # `SIS_DISTILLER_MODEL` / `SIS_CURATE_MODEL` still pin a tier when someone
 # wants distillation on a different one than they are working on.
 CURATE_TRIGGER = "curate"
+COMPRESS_TRIGGER = "compress"
+# Passes that read the library instead of a transcript.
+LIBRARY_TRIGGERS = (CURATE_TRIGGER, COMPRESS_TRIGGER)
 
 # Below this the CLI accepts an invalid --json-schema silently and returns
 # unstructured text, which is indistinguishable from a model that ignored the
@@ -645,24 +649,168 @@ def is_curate_job(job: Dict[str, Any]) -> bool:
     return str(job.get("trigger") or "") == CURATE_TRIGGER
 
 
-def build_curate_prompt(job: Dict[str, Any]) -> str:
+def is_compress_job(job: Dict[str, Any]) -> bool:
+    """A description-compression batch (0.18.0)."""
+    return str(job.get("trigger") or "") == COMPRESS_TRIGGER
+
+
+def is_library_job(job: Dict[str, Any]) -> bool:
+    """Any pass that reads the library instead of a transcript."""
+    return str(job.get("trigger") or "") in LIBRARY_TRIGGERS
+
+
+def _job_group(job: Dict[str, Any]) -> Tuple[Optional[str], List[str]]:
+    """(group id, member names) a library job was enqueued with. The id also
+    rides in the session id (`curator-<id>`, `compress-<id>`) for rows written
+    without a payload."""
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    group_id = str(payload.get("id") or "") or None
+    if group_id is None:
+        session = str(job.get("session_id") or "")
+        if "-" in session:
+            group_id = session.split("-", 1)[1] or None
+    members = [str(m) for m in (payload.get("members") or []) if m]
+    return group_id, members
+
+
+def _members_block(members: Sequence[skill_similarity.SkillFacts]) -> str:
+    return "\n".join(
+        "- {0} (SKILL.md {1} chars, description {2} chars, used {3}x, viewed {4}x): {5}".format(
+            f.name, f.size, len(f.description), f.use_count, f.view_count, f.description[:300])
+        for f in members)
+
+
+def resolve_cluster(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The cluster a consolidation job should work on, as it stands NOW.
+
+    The members enqueued with the job are preferred and filtered to what is
+    still in the library; if fewer than two survive, the clusters are
+    recomputed from the tree and matched by id. None means the group has
+    dissolved since it was queued (archived, merged by an earlier job) and
+    there is nothing left to do."""
+    group_id, members = _job_group(job)
+    inventory = skill_similarity.read_inventory(records=_usage_records())
+    by_name = {f.name: f for f in inventory}
+    present = [by_name[m] for m in members if m in by_name and by_name[m].provenance and not by_name[m].pinned]
+    if len(present) >= 2:
+        return {"id": group_id, "members": present, "matched": True}
+    groups = skill_similarity.clusters(inventory)
+    found = skill_similarity.find_group(groups, group_id) if group_id else None
+    if found is None and members:
+        found = skill_similarity.closest_group(groups, members)
+    if found is None:
+        return None
+    return {"id": found["id"], "members": [by_name[m] for m in found["members"] if m in by_name],
+            "matched": bool(found.get("matched"))}
+
+
+def resolve_batch(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The description-compression batch a job should work on, filtered to the
+    skills still present and still over the cap."""
+    group_id, members = _job_group(job)
+    inventory = skill_similarity.read_inventory(records=_usage_records())
+    cap = validate_skill.MAX_DESCRIPTION_NEW
+    still_over = set(skill_similarity.over_cap(inventory, max_desc=cap))
+    by_name = {f.name: f for f in inventory}
+    present = [by_name[m] for m in members if m in still_over]
+    if not present and not members:
+        # A row without a payload: take the first batch the library yields.
+        first = skill_similarity.batches(sorted(still_over))
+        if first:
+            present = [by_name[m] for m in first[0]["members"]]
+            group_id = first[0]["id"]
+    if not present:
+        return None
+    return {"id": group_id, "members": present, "matched": True}
+
+
+def _usage_records() -> Dict[str, Any]:
+    if usage_store is None:
+        return {}
+    try:
+        return usage_store.all_records()
+    except Exception:
+        return {}
+
+
+def build_compress_prompt(job: Dict[str, Any], *, batch: Optional[Dict[str, Any]] = None) -> str:
+    """The unattended description-compression pass (0.18.0).
+
+    One job, one batch of existing skills whose descriptions exceed the cap.
+    Only the `description` line may change: the guard reverts any skill whose
+    body or other frontmatter moved, so the prompt says so plainly."""
+    skills_root = skill_paths.personal_skills_root()
+    cap = validate_skill.MAX_DESCRIPTION_NEW
+    members = (batch or {}).get("members") or []
+    return (
+        "Run the plugin's skill-library maintenance as an unattended "
+        "description-compression pass.\n\n"
+        "## What this is\n"
+        "Each learned skill's `description` is what a future session sees in its "
+        "skill listing, and that listing runs on a fixed budget: descriptions "
+        "longer than about {1} characters are cut from the least-used skills "
+        "first, so a long description makes a skill LESS findable. The skills "
+        "below all exceed the cap. Rewrite each description as ONE sentence of at "
+        "most {1} characters that names the single workflow situation in which "
+        "the skill should trigger.\n\n"
+        "## Hard rules — violating any of these reverts the skill\n"
+        "- Change ONLY the `description:` line of each SKILL.md under {0}. The "
+        "body, `name`, `metadata` and every other frontmatter line stay "
+        "byte-for-byte as they are; a skill whose body changed is reverted.\n"
+        "- Do not add `when_to_use`, do not list adjacent situations or synonyms, "
+        "do not keep the old text as a second sentence. If the trigger cannot be "
+        "said in {1} characters, leave that skill untouched and report it in "
+        "`candidates` with the reason.\n"
+        "- Skip a skill whose file is missing (it may have been archived since "
+        "this batch was queued).\n"
+        "- Do not run commands; Read and Edit are all this needs.\n\n"
+        "## Skills in this batch\n{2}\n\n"
+        "## Result\n"
+        "Your final message must be ONLY the structured result the output schema "
+        "describes. List each rewritten skill in `skills` with action "
+        "'description compressed', the untouched ones in `candidates`, and use "
+        "status `changed` if anything was rewritten, else `nothing_to_save`.\n"
+    ).format(skills_root, cap, _members_block(members) or "- (none)")
+
+
+def build_curate_prompt(job: Dict[str, Any], *, cluster: Optional[Dict[str, Any]] = None) -> str:
     """The unattended umbrella-consolidation pass.
 
-    No untrusted evidence goes in — the child reads the skill library itself,
-    which is both smaller in the prompt and always current. The boundary that
-    matters here is the opposite of distillation's: this job DELETES (archives)
-    skills, so the rules are about what it may not touch and what it must
-    verify after moving something.
+    No untrusted evidence goes in. Since 0.18.0 the worker hands the child ONE
+    cluster of similar skills (found deterministically by skill_similarity) and
+    the child reads only those files; with `cluster=None` — a job queued by an
+    older version — it falls back to inventorying the library itself, which
+    is how the 0.17.0 passes ran out their 600-second clock on 158 skills.
 
-    The conservatism is deliberate. A human running /curate-skills sees the
-    plan before it is applied; nobody sees this one until it is done. So the
-    prompt asks for the merges whose evidence is in the skills themselves
-    (they cite each other, they came from one task) and tells it to leave the
-    merely-adjacent ones alone.
+    The boundary that matters here is the opposite of distillation's: this job
+    DELETES (archives) skills, so the rules are about what it may not touch and
+    what it must verify after moving something. Nobody sees the plan before it
+    is applied, so the prompt asks for the merges whose evidence is in the
+    skills themselves and tells it to leave the merely-adjacent ones alone.
     """
     skills_root = skill_paths.personal_skills_root()
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     transitions = os.path.join(scripts_dir, "curator_transitions.py")
+    cap = validate_skill.MAX_DESCRIPTION_NEW
+    if cluster and cluster.get("members"):
+        scope = (
+            "## This cluster\n"
+            "The worker grouped these skills because their names or descriptions "
+            "overlap; read ONLY these files and decide whether they are genuinely "
+            "one skill.\n{0}\n\n".format(_members_block(cluster["members"]))
+        )
+        inventory_step = (
+            "1. Read each member listed above (its SKILL.md and any references/ it "
+            "points to). Do not inventory the rest of the library.\n"
+        )
+    else:
+        scope = ""
+        inventory_step = (
+            "1. Inventory: read each `{0}/*/SKILL.md` frontmatter (name, "
+            "description, provenance) and note each file's size. Read the usage "
+            "records at the plugin state dir's `skill_usage.json` for `created_by` "
+            "and `pinned`.\n".format(skills_root)
+        )
     return (
         "Run the plugin's skill-library curation as an unattended "
         "umbrella-consolidation pass. Nobody will review a plan first, so "
@@ -672,7 +820,8 @@ def build_curate_prompt(job: Dict[str, Any]) -> str:
         "is a library of class-level skills: a broad umbrella with labelled "
         "sub-sections is more discoverable than five narrow siblings, because "
         "skills are matched on their description, not their name. Your job is "
-        "to find clusters that are genuinely ONE skill and merge them.\n\n"
+        "to decide whether a cluster is genuinely ONE skill and, if so, merge it.\n\n"
+        + scope +
         "## Hard rules — violating any of these fails the run\n"
         "- Touch ONLY skills whose usage record says `created_by: agent` AND "
         "whose SKILL.md frontmatter carries `provenance: self-improving-skills`. "
@@ -683,10 +832,12 @@ def build_curate_prompt(job: Dict[str, Any]) -> str:
         "{0}/.archive/) is the most destructive action available to you.\n"
         "- Write only under {0}. Never touch a repository file, this plugin's "
         "own source, or any configuration.\n"
-        "- `use_count` is NOT evidence. The counter is young and mostly zero; "
-        "`use=0` is absence of evidence, not evidence of worthlessness. Judge "
-        "overlap by CONTENT. (Time-based pruning is a separate mechanism that "
-        "already runs — it is not your job.)\n\n"
+        "- `use_count` is evidence in one direction only. A skill whose "
+        "description was cut from the session listing could never have been "
+        "invoked, so `use=0` says nothing about its worth; but `use>0` proves the "
+        "skill works as written — when merging, keep that one as the umbrella "
+        "and fold the others into it. Judge overlap by CONTENT. (Time-based "
+        "pruning is a separate mechanism that already runs — not your job.)\n\n"
         "## What to merge, and what to leave alone\n"
         "Merge when the skills are one task's several stages — the strongest "
         "signal is that they already cite each other, or describe the same "
@@ -702,19 +853,19 @@ def build_curate_prompt(job: Dict[str, Any]) -> str:
         "'this is the orthogonal concern') AND are large — that is a previous "
         "deliberate split, not an accident.\n\n"
         "## Procedure\n"
-        "1. Inventory: read each `{0}/*/SKILL.md` frontmatter (name, "
-        "description, provenance) and note each file's size. Read the usage "
-        "records at the plugin state dir's `skill_usage.json` for `created_by` "
-        "and `pinned`.\n"
-        "2. Pick clusters by the test above. If none qualifies, stop and "
-        "return `nothing_to_save` — that is a good outcome, not a failure.\n"
-        "3. For each cluster: write the umbrella SKILL.md first (either extend "
-        "the member that is already broad enough, or create a new one), "
+        + inventory_step +
+        "2. Apply the test above. If the cluster does not qualify, stop and "
+        "return `nothing_to_save` — that is a good outcome, not a failure. If "
+        "only a subset is one skill, merge that subset and leave the rest.\n"
+        "3. Write the umbrella SKILL.md first (extend the member that is already "
+        "broad enough — prefer one with `use>0` — or create a new one), "
         "preserving every member's technical detail as a labelled section. "
-        "Deduplicate what the members repeated. The umbrella's `description` "
-        "must carry the trigger phrasing of ALL absorbed members — that is "
-        "what makes them findable. Keeping the triggers matters more than "
-        "hitting any length target.\n"
+        "Deduplicate what the members repeated. The umbrella's `description` is "
+        "ONE sentence of at most {2} characters naming the shared situation; do "
+        "not concatenate the members' descriptions — a 1,024+ character umbrella "
+        "description is exactly how the 0.17.0 passes failed validation. If the "
+        "shared situation cannot be said in one sentence, the cluster is not one "
+        "skill: merge only the subset that fits.\n"
         "4. Archive each absorbed member by running exactly:\n"
         "   python3 {1} archive \"<absorbed-skill>\" \"<umbrella-skill>\"\n"
         "   This records the umbrella in `absorbed_into`, so the merge stays "
@@ -740,7 +891,7 @@ def build_curate_prompt(job: Dict[str, Any]) -> str:
         "each absorbed member with 'absorbed into <umbrella>'. Put the cluster "
         "reasoning in `summary`. Use status `changed` if anything moved, "
         "`nothing_to_save` if you deliberately merged nothing.\n"
-    ).format(skills_root, transitions)
+    ).format(skills_root, transitions, cap)
 
 
 def child_environment(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -1463,10 +1614,10 @@ def process_job(
         queue.block(job_id, owner, code=code, message=message)
         return {"job_id": job_id, "status": "blocked", "reason": code}
 
-    if is_curate_job(job):
-        # A curation pass has no transcript to stand on — it reads the skill
-        # library directly. Going through read_evidence would block the job on
-        # the empty path it was enqueued with.
+    if is_library_job(job):
+        # A curation or compression pass has no transcript to stand on — it
+        # reads the skill library directly. Going through read_evidence would
+        # block the job on the empty path it was enqueued with.
         evidence = Evidence(text="", rows=0, cwd=str(job.get("cwd") or "") or None)
     else:
         try:
@@ -1529,6 +1680,43 @@ def process_job(
 
 
 BASELINE_INDEX = "index.json"
+
+
+def _split_description(text: str) -> Tuple[Optional[str], Optional[str], str]:
+    """(frontmatter without its description line, description, body)."""
+    fm, body = validate_skill._split_frontmatter(text)
+    if fm is None:
+        return None, None, text
+    kept, desc = [], None
+    for line in fm.splitlines():
+        if desc is None and re.match(r"^description\s*:", line):
+            desc = line
+            continue
+        kept.append(line)
+    return "\n".join(kept), desc, body or ""
+
+
+def _enforce_description_only(guard: Dict[str, Any], before: skill_guard.Snapshot) -> None:
+    """A compression pass may change nothing but the description line. Any
+    installed skill whose body or other frontmatter moved is put back and
+    reported as rolled back — in place, so `_merge_guard` sees the truth."""
+    kept: List[Dict[str, str]] = []
+    for item in guard.get("installed") or []:
+        path = item.get("path") or ""
+        original = before.original(path)
+        current = skill_guard._read(path)
+        if original is None or current is None or item.get("new"):
+            reason = "compress_created_a_skill" if item.get("new") else "compress_no_baseline"
+        else:
+            before_fm, _, before_body = _split_description(original.decode("utf-8", "replace"))
+            after_fm, _, after_body = _split_description(current.decode("utf-8", "replace"))
+            reason = None if (before_fm, before_body) == (after_fm, after_body) else "compress_touched_body"
+        if reason is None:
+            kept.append(item)
+            continue
+        skill_guard._restore(path, original, before.modes.get(path))
+        guard.setdefault("rolled_back", []).append({"name": item["name"], "reason": reason})
+    guard["installed"] = kept
 
 
 def _prompt_context(job: Dict[str, Any], evidence: Evidence) -> Dict[str, Any]:
@@ -1654,16 +1842,35 @@ def _run_job(
 ) -> Dict[str, Any]:
     job_id = int(job["id"])
     curating = is_curate_job(job)
+    compressing = is_compress_job(job)
+    library_pass = curating or compressing
     # Empty means "don't pass --model", i.e. inherit the account's own model.
-    override = os.environ.get("SIS_CURATE_MODEL" if curating else "SIS_DISTILLER_MODEL")
+    override = os.environ.get("SIS_CURATE_MODEL" if library_pass else "SIS_DISTILLER_MODEL")
     model = str(job.get("model") or override or "").strip() or None
 
     if cli_version_used:
         queue.set_cli_version(job_id, owner, cli_version_used)
 
     command = build_claude_command(claude_bin, model=model)
+    group: Optional[Dict[str, Any]] = None
     if curating:
-        prompt = build_curate_prompt(job)
+        group = resolve_cluster(job)
+        if group is None and _job_group(job)[1]:
+            # Queued for a cluster that no longer exists (an earlier job merged
+            # or the curator archived it): nothing left to consolidate.
+            queue.complete(job_id, owner, {
+                "status": "nothing_to_save", "skills": [], "candidates": [],
+                "summary": "the cluster this job was queued for has dissolved since"})
+            return {"job_id": job_id, "status": "done", "reason": "cluster_dissolved"}
+        prompt = build_curate_prompt(job, cluster=group)
+    elif compressing:
+        group = resolve_batch(job)
+        if group is None:
+            queue.complete(job_id, owner, {
+                "status": "nothing_to_save", "skills": [], "candidates": [],
+                "summary": "every skill in this batch is gone or already within the cap"})
+            return {"job_id": job_id, "status": "done", "reason": "batch_dissolved"}
+        prompt = build_compress_prompt(job, batch=group)
     else:
         prompt = build_prompt(job, evidence, **_prompt_context(job, evidence))
     deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
@@ -1698,6 +1905,8 @@ def _run_job(
         command, prompt=prompt, cwd=workspace, env=env, deadline=deadline, heartbeat=heartbeat
     )
     guard = skill_guard.verify(before)
+    if compressing:
+        _enforce_description_only(guard, before)
 
     # Guard violations outrank whatever the child reported. A run that left an
     # unrevertable change and then timed out has still left it, so checking this
