@@ -67,6 +67,19 @@ def backup_dir():
     return os.path.join(state_dir(), "skill_backups")
 
 
+def int_env(name, default):
+    """An integer SIS_* knob, falling back to `default` when unset or garbage.
+
+    One definition for every consumer. The Stop hook, SessionStart and the
+    curator each used to carry a private copy; three copies of a four-line
+    function is exactly how one of them ends up parsing a knob differently.
+    """
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def personal_skills_root():
     return os.path.join(user_home(), ".claude", "skills")
 

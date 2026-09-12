@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 import sis_io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import skill_paths  # noqa: E402
 import usage_store  # noqa: E402
 try:
     import curator_backup
@@ -51,10 +52,7 @@ _ARCHIVE_SUFFIX_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 
 def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+    return skill_paths.int_env(name, default)
 
 
 def _now():

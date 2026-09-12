@@ -183,10 +183,7 @@ def _read_seen():
 
 
 def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+    return skill_paths.int_env(name, default)
 
 
 def _count_learned_skills():

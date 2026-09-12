@@ -45,6 +45,7 @@ from typing import NoReturn
 
 import runtime_env
 import sis_io
+import skill_paths
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -73,10 +74,7 @@ def approve() -> NoReturn:
 
 
 def _int_env(name, default):
-    try:
-        return int(os.environ.get(name, str(default)))
-    except (TypeError, ValueError):
-        return default
+    return skill_paths.int_env(name, default)
 
 
 def _tool_uses(row):
