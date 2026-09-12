@@ -275,7 +275,8 @@ def _run_curator(state, lines):
         if na or ns or nr:
             lines.append(
                 "[큐레이터] 미사용 스킬 자동 정리 실행: stale {0}개, 아카이브 {1}개, 재활성화 {2}개. "
-                "아카이브된 스킬은 ~/.claude/skills/.archive/ 로 이동(삭제 아님, /restore-skill 로 복구). "
+                "아카이브된 스킬은 ~/.claude/skills/.archive/ 로 이동(삭제 아님, 하나씩은 /restore-skill, "
+                "이번 정리 전체를 되돌리려면 /curator-rollback). "
                 "세부 리포트는 ~/.claude/self-improve/logs/curator/.".format(ns, na, nr)
             )
         else:
