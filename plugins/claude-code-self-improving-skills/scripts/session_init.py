@@ -122,9 +122,16 @@ def _background_note():
             "심볼릭 링크 때문에 보류됐던 증류 작업 {0}건이 있습니다 — 이 제한은 "
             "없어졌으니 /distill-status retry 로 재시도하세요".format(
                 blocked_by_code["symlinked_skills"]))
+    if blocked_by_code.get("out_of_scope_write"):
+        # Same story as symlinked_skills: the home-file watchlist is gone.
+        alerts.append(
+            "홈 파일 감시 때문에 보류됐던 증류 작업 {0}건이 있습니다 — 이 검사는 "
+            "없어졌으니 /distill-status retry 로 재시도하세요".format(
+                blocked_by_code["out_of_scope_write"]))
     other_blocked = sum(
         count for code, count in blocked_by_code.items()
-        if code not in ("authentication_required", "unprotected_write", "symlinked_skills"))
+        if code not in ("authentication_required", "unprotected_write",
+                        "symlinked_skills", "out_of_scope_write"))
     if other_blocked:
         alerts.append("보류된 증류 작업 {0}건 (/distill-status)".format(other_blocked))
     if counts.get("failed"):

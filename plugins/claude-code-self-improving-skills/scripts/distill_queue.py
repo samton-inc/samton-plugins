@@ -271,9 +271,10 @@ def validate_result(value: Any) -> Dict[str, Any]:
     an invalid schema silently. Unknown keys are dropped rather than rejected,
     so a chattier model can't fail an otherwise usable job.
 
-    `skills[].path` and `out_of_scope_writes` are filled in by the worker's
-    guard pass, not by the model, but they round-trip through here so a
-    recovered job reloads them intact.
+    `skills[].path` is filled in by the worker's guard pass, not by the model,
+    but it round-trips through here so a recovered job reloads it intact.
+    `out_of_scope_writes` is still accepted for rows written before 0.18.0,
+    when the guard watched a list of home files; nothing produces it now.
     """
     if not isinstance(value, dict):
         raise ValueError("distill result must be a JSON object")

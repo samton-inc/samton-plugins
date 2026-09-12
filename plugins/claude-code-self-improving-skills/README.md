@@ -140,7 +140,7 @@ install -m 600 /dev/null ~/.claude/self-improve/worker.env
 - **deny 규칙이 없습니다.** 예전에는 셸 rc 파일, `.ssh/**`, `.aws/**`, `~/.claude/settings.json`, 이 플러그인의 소스, 워커의 롤백 baseline 을 차단했습니다. deny 는 `bypassPermissions` 에서도 유효한 유일한 권한 통제였고, 그게 비었습니다. 자식은 파일시스템 어디든 쓸 수 있습니다.
 - **도구 제한이 없습니다.** 예전에는 `Read, Edit, Write, Glob, Grep` 만 허용하고 `Bash` 를 막았습니다. 이제 `Bash` 가 열려 있어, 인젝션이 성공하면 **임의 명령 실행**으로 이어집니다.
 - **프롬프트는 인젝션과 같은 채널입니다.** 위 2번의 지시는 transcript 와 같은 입력 스트림에 있습니다. 인젝션이 지시를 이기면 그 지시를 무력화한 것이므로, 채널 밖에서 막아 주는 것은 이제 없습니다.
-- 스킬 트리 밖 변조 탐지는 **watchlist 12개 파일 한정**입니다(`.claude/settings.json`·`settings.local.json`·`CLAUDE.md`, 셸 rc 6종, `.envrc`, `.npmrc`, `.gitconfig`). 전체 파일시스템 스냅샷은 불가능하고, 이제 이 watchlist 가 실질적으로 유일한 사후 신호입니다. `~/.claude.json` 은 자식이 정상 동작으로 다시 쓰기 때문에 목록에서 빠져 있는데, deny 도 없어졌으므로 그 파일은 이제 막히지도 관측되지도 않습니다.
+- **스킬 트리 밖은 관측하지 않습니다.** 0.17.0 까지는 홈의 파일 12개(`.claude/settings.json`·`settings.local.json`·`CLAUDE.md`, 셸 rc 6종, `.envrc`, `.npmrc`, `.gitconfig`)를 실행 전후로 해시해 바뀌면 작업을 막았습니다. 그런데 CLI 자체가 `~/.claude/settings.json` 을 평소 동작으로 다시 써서(`.claude.json` 과 같은 이유) 멀쩡한 증류·통합 작업이 막혔고, 0.18.0 에서 이 watchlist 를 **플러그인 소유자의 결정으로 제거**했습니다. 자식이 트리 밖에 무엇을 썼는지 알려 주는 사후 신호는 이제 없습니다 — 망가지면 사용자가 직접 확인합니다.
 - **심볼릭 링크된 스킬은 롤백 대상이 아닙니다.** 링크를 따라가면 임의 파일이 스냅샷에 딸려 들어오거나 순환이 생기므로 스냅샷은 링크에서 멈춥니다. 링크를 통한 쓰기는 되돌려지지도 위반으로 보고되지도 않습니다. 어떤 링크가 보호 밖인지는 `/distill-status` 가 호출 시점의 트리를 훑어 알려줍니다. 예전에는 링크가 하나라도 있으면 **전체 작업을 거부**했지만, 링크 하나가 라이브러리 전체의 증류를 막는 대가가 너무 컸습니다.
 - 관리형 조직이 `permissions.disableBypassPermissionsMode` 를 걸었거나 root 로 실행 중이면 백그라운드 모드는 동작하지 않고 foreground 로 폴백합니다.
 

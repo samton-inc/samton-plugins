@@ -13,8 +13,11 @@ canonical account of that change and what it costs.
 What this module is, precisely: detection and rollback, not prevention. A bad
 write happens first and is undone after, and only inside the skill tree. That
 tree is fully snapshotted, so a write there is always caught. Outside it,
-nothing stops a write and it is detected only if it lands on a bounded
-watchlist of high-value files — a full-filesystem snapshot is not feasible.
+nothing stops a write and nothing observes one either: the watchlist of home
+files that 0.17.0 hashed before and after each run was removed in 0.18.0 by
+the plugin owner's decision — the CLI itself rewrites `~/.claude/settings.json`
+as normal operation, which blocked healthy runs, and the owner would rather
+inspect damage by hand than have the guard judge writes outside the tree.
 
 Symlinked entries are the one gap inside the tree. Following a link would pull
 arbitrary files into the snapshot or loop, so the walk stops there and a write
@@ -44,44 +47,6 @@ except Exception:  # pragma: no cover - telemetry is best-effort
 # the cap we keep hashes (detection still works) but lose rollback content,
 # which is reported rather than silently accepted.
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
-
-
-def watchlist(home: Optional[str] = None) -> List[str]:
-    """High-value files outside the skill tree that must never change.
-
-    Kept deliberately short: every entry is a file whose modification would
-    grant persistence or exfiltration, so a hit here is worth interrupting the
-    user for. This is detection only — nothing prevents these writes. The list
-    used to mirror the worker's deny rules; those are empty now, so a hit means
-    the write already happened.
-
-    NOT here: `.claude.json`. The child IS a Claude Code session, and the CLI
-    rewrites that global-state file as normal operation — trust prompts, recent
-    projects, MCP state — through its own internals rather than a tool call.
-    Watching it would flag every healthy distillation as an out-of-scope write
-    (confirmed against a real `claude -p` run). It was covered by the deny rules
-    instead; with those gone it is neither denied nor watched, so a tool-call
-    write to it now passes unnoticed.
-    """
-    base = home or skill_paths.user_home()
-    relative = (
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-        ".claude/CLAUDE.md",
-        ".zshrc",
-        ".zprofile",
-        ".zshenv",
-        ".bashrc",
-        ".bash_profile",
-        ".profile",
-        ".envrc",
-        ".npmrc",
-        ".gitconfig",
-    )
-    # Split each relative entry on "/" so os.path.join yields native separators
-    # — otherwise a Windows path is "C:\\home\\.claude/settings.json", a mixed
-    # form that no normalized path (or exact-string report check) will match.
-    return [os.path.join(base, *name.split("/")) for name in relative]
 
 
 def _digest(data: bytes) -> str:
@@ -184,7 +149,7 @@ def _owning_skill(path: str, root: str) -> Optional[str]:
 
 
 class Snapshot:
-    """The state of the skill tree and the watchlist at one moment.
+    """The state of the skill tree at one moment.
 
     File contents are written to `store`, not held in memory. If the worker is
     killed between the child's writes and `verify`, an in-memory baseline would
@@ -199,7 +164,6 @@ class Snapshot:
         self.store = store
         self.files: Dict[str, str] = {}
         self.modes: Dict[str, int] = {}
-        self.watched: Dict[str, Optional[str]] = {}
         self.patch_counts: Dict[str, int] = {}
         self.unbacked: Set[str] = set()
 
@@ -239,12 +203,6 @@ class Snapshot:
                     total += len(data)
                 else:
                     self.unbacked.add(path)
-        for path in watchlist(self.home):
-            # Followed on purpose: a dotfiles setup where ~/.zshrc is a symlink
-            # is normal, and hashing the link itself would report "absent" for
-            # a file the child can very much write through.
-            data = _read(path, follow=True)
-            self.watched[path] = _digest(data) if data is not None else None
         self.patch_counts = _patch_counts()
         return self
 
@@ -374,8 +332,9 @@ def verify(before: Snapshot) -> Dict[str, Any]:
       installed            skills whose new SKILL.md passed validation
       assets               accepted non-SKILL.md files (references/, scripts/)
       rolled_back          files reverted (invalid, pinned, loose, or escaped)
-      out_of_scope_writes  watchlist files that changed
       unprotected          paths the guard could not have reverted
+
+    Nothing outside the skill tree is observed (see the module docstring).
 
     Symlinked entries appear in none of these: they are neither snapshotted nor
     reverted nor flagged (see the module docstring). `symlinked_entries()` lists
@@ -519,16 +478,12 @@ def verify(before: Snapshot) -> Dict[str, Any]:
         else:
             assets.append(path)
 
-    out_of_scope = [
-        path for path, digest in after.watched.items() if before.watched.get(path) != digest
-    ]
     _record_patches(installed, before.patch_counts)
 
     report: Dict[str, Any] = {
         "installed": installed,
         "assets": sorted(assets),
         "rolled_back": rolled_back,
-        "out_of_scope_writes": sorted(out_of_scope),
     }
     if archived:
         report["archived"] = archived

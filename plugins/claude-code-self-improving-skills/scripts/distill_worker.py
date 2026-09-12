@@ -1481,9 +1481,8 @@ def _job_baseline(baseline_dir: Path) -> skill_guard.Snapshot:
                 stored["root"], stored.get("home"), str(baseline_dir)
             )
             snapshot.files = dict(stored.get("files") or {})
-            # A `symlinks` key from an older baseline is ignored: the snapshot
-            # no longer carries one.
-            snapshot.watched = dict(stored.get("watched") or {})
+            # `symlinks` and `watched` keys from an older baseline are ignored:
+            # the snapshot no longer carries either.
             snapshot.patch_counts = dict(stored.get("patch_counts") or {})
             snapshot.modes = {k: int(v) for k, v in (stored.get("modes") or {}).items()}
             snapshot.unbacked = set(stored.get("unbacked") or [])
@@ -1500,7 +1499,6 @@ def _job_baseline(baseline_dir: Path) -> skill_guard.Snapshot:
                     "root": snapshot.root,
                     "home": snapshot.home,
                     "files": snapshot.files,
-                    "watched": snapshot.watched,
                     "patch_counts": snapshot.patch_counts,
                     "modes": snapshot.modes,
                     "unbacked": sorted(snapshot.unbacked),
@@ -1607,8 +1605,8 @@ def _run_job(
     )
     guard = skill_guard.verify(before)
 
-    # Guard violations outrank whatever the child reported. A run that modified
-    # a watched file and then timed out has still modified it, so checking this
+    # Guard violations outrank whatever the child reported. A run that left an
+    # unrevertable change and then timed out has still left it, so checking this
     # only on the success path would let exactly the interesting cases through.
     violation = _guard_violation(guard)
     if violation is not None:
@@ -1754,8 +1752,6 @@ def _guard_violation(guard: Dict[str, Any]) -> Optional[Tuple[str, List[str]]]:
     """The blocking guard finding, if any. Checked on every outcome."""
     if guard.get("unprotected"):
         return "unprotected_write", list(guard["unprotected"])
-    if guard.get("out_of_scope_writes"):
-        return "out_of_scope_write", list(guard["out_of_scope_writes"])
     return None
 
 
@@ -1768,10 +1764,7 @@ def _violation_result(guard: Dict[str, Any], code: str, paths: List[str]) -> Dic
         "candidates": [],
         "summary": "blocked: {0}".format(code),
     }
-    if code == "unprotected_write":
-        body["unprotected"] = paths
-    else:
-        body["out_of_scope_writes"] = paths
+    body["unprotected"] = paths
     if guard.get("rolled_back"):
         body["rolled_back"] = [
             "{0}: {1}".format(item["name"], item["reason"]) for item in guard["rolled_back"]
@@ -1801,11 +1794,8 @@ def _merge_guard(
         # A consolidation pass archives what it merged away; surfacing it keeps
         # the job record honest about what left the live tree.
         merged["archived"] = sorted({item["name"] for item in guard["archived"]})
-    if guard["out_of_scope_writes"]:
-        merged["out_of_scope_writes"] = guard["out_of_scope_writes"]
-    # Kept separate from out_of_scope_writes on purpose: "something changed
-    # outside the tree" and "a change here could not have been reverted" call
-    # for different responses, and the caller blocks the job on the latter.
+    # "A change here could not have been reverted" is the one finding the
+    # caller blocks the job on.
     if guard.get("unprotected"):
         merged["unprotected"] = guard["unprotected"]
     accepted_assets = guard.get("assets") or []

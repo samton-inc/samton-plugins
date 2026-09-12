@@ -39,10 +39,15 @@ REMEDIES = {
         "your organization disables bypassPermissions; background distillation "
         "cannot write skills. Set SIS_REVIEW_MODE=foreground to keep the nudge."
     ),
-    # Kept only to explain jobs blocked by the old rule; nothing produces it now.
+    # Kept only to explain jobs blocked by old rules; nothing produces these now.
     "symlinked_skills": (
         "blocked by a rule that no longer exists — a symlinked skill used to "
         "refuse the whole run. `retry --all-blocked` picks these up."
+    ),
+    "out_of_scope_write": (
+        "blocked by a rule that no longer exists — the guard used to fail a run "
+        "when a home file such as ~/.claude/settings.json changed, which the CLI "
+        "itself does. `retry --all-blocked` picks these up."
     ),
     "unprotected_write": (
         "the guard saw a change it could not guarantee a rollback for — inspect "
