@@ -896,8 +896,8 @@ class ReviewQueue:
                    lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL, worker_pid=NULL,
                    worker_pid_identity=NULL,
                    error_code=NULL, last_error=NULL, retry_delay_seconds=NULL
-                   WHERE id=? AND status='running' AND lease_owner=?""",
-                (json.dumps(normalized, ensure_ascii=False), now, now, int(job_id), owner),
+                   WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?""",
+                (json.dumps(normalized, ensure_ascii=False), now, now, int(job_id), owner, now),
             )
             return cur.rowcount == 1
 
@@ -906,8 +906,8 @@ class ReviewQueue:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT * FROM review_jobs WHERE id=? AND status='running' AND lease_owner=?",
-                (int(job_id), owner),
+                "SELECT * FROM review_jobs WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?",
+                (int(job_id), owner, now),
             ).fetchone()
             if row is None:
                 conn.commit()
@@ -945,8 +945,8 @@ class ReviewQueue:
                 """UPDATE review_jobs SET status='blocked', error_code=?, last_error=?, completed_at=?,
                    updated_at=?, lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL,
                    worker_pid=NULL, worker_pid_identity=NULL
-                   WHERE id=? AND status='running' AND lease_owner=?""",
-                (str(code)[:128], str(message)[:4000], now, now, int(job_id), owner),
+                   WHERE id=? AND status='running' AND lease_owner=? AND lease_expires_at > ?""",
+                (str(code)[:128], str(message)[:4000], now, now, int(job_id), owner, now),
             )
             return cur.rowcount == 1
 

@@ -83,7 +83,9 @@ def test_diagnostics_require_current_live_job_lease_and_clear_on_manual_retry(tm
     with sqlite3.connect(queue.path) as conn:
         conn.execute("UPDATE review_jobs SET lease_expires_at=0 WHERE id=?", (job_id,))
     assert queue.set_diagnostics(job_id, "worker", {"stage": "complete"}) is False
-    queue.block(job_id, "worker", code="authentication_required", message="fixed diagnostic")
+    assert queue.block(job_id, "worker", code="authentication_required", message="fixed diagnostic") is False
+    assert queue.heartbeat_job(job_id, "worker") is True
+    assert queue.block(job_id, "worker", code="authentication_required", message="fixed diagnostic") is True
     assert queue.get(job_id)["authentication_classification"] == "verified"
     assert queue.set_diagnostics(job_id, "worker", diagnostics) is False
     assert queue.retry(job_id) is True
@@ -433,3 +435,21 @@ def test_cleanup_keeps_pending_and_blocked_jobs(tmp_path, monkeypatch):
     assert queue.get(ids[1]) is None
     assert queue.get(ids[2])["status"] == "blocked"
     assert queue.get(ids[3])["status"] == "pending"
+
+
+@pytest.mark.parametrize("operation", ["complete", "block", "fail"])
+def test_expired_lease_cannot_commit_terminal_state(tmp_path, operation):
+    queue = review_queue.ReviewQueue(tmp_path / "jobs.sqlite3")
+    job_id = queue.enqueue(session_id='s',turn_id='t',transcript_path=str(tmp_path/'source'),
+                           transcript_rows=1, signal=False, signal_source='none', trigger='test', model=None)['job_id']
+    queue.claim_next('owner', pid=os.getpid())
+    with sqlite3.connect(queue.path) as conn:
+        conn.execute('UPDATE review_jobs SET lease_expires_at=0 WHERE id=?', (job_id,))
+    if operation == 'complete':
+        result = queue.complete(job_id, 'owner', {'status':'nothing_to_save','skills':[], 'candidates':[], 'summary':'none'})
+    elif operation == 'block':
+        result = queue.block(job_id, 'owner', code='source_missing', message='missing')
+    else:
+        result = queue.fail(job_id, 'owner', code='codex_failed', message='failed')['updated']
+    assert result is False
+    assert queue.get(job_id)['status'] == 'running'

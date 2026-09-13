@@ -273,7 +273,7 @@ def test_review_worker_tool_runs_once_without_codex_fallback(tmp_path):
         extra_env={"CODEX_SELF_IMPROVE_CODEX_BIN": str(tmp_path / "missing-codex")},
     )
     payload = json.loads(responses[0]["result"]["content"][0]["text"])
-    assert payload == {"processed": 0, "reason": "codex_not_found", "started": False}
+    assert payload == {"processed": 0, "reason": "codex_override_invalid", "started": False}
 
 
 def test_review_job_tool_exposes_structured_repo_candidate(tmp_path):
