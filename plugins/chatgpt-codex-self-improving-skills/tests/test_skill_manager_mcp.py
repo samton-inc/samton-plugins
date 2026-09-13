@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -177,6 +178,25 @@ def test_status_exposes_sanitized_queue_counts_and_last_failure(tmp_path):
     encoded = json.dumps(payload)
     assert str(transcript) not in encoded
     assert "SECRET_TRANSCRIPT_CONTENT" not in encoded
+
+
+def test_review_jobs_exposes_allowlisted_diagnostics_and_marks_legacy_auth(tmp_path):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    job_id, transcript = _blocked_job(tmp_path)
+    with sqlite3.connect(tmp_path / "data" / "review-jobs.sqlite3") as conn:
+        conn.execute("UPDATE review_jobs SET error_code='authentication_required', diagnostics_json=? WHERE id=?", (
+            json.dumps({"cli_version": "0.146.0", "stage": "execution",
+                        "stdout": "SECRET_SOURCE", "cli_source": "path\nSECRET_SOURCE"}), job_id))
+    responses = _drive(tmp_path, skills, [_call(1, "codex_review_jobs", {"status": "blocked"})])
+    payload = json.loads(responses[0]["result"]["content"][0]["text"])
+    job = payload["jobs"][0]
+    assert job["diagnostics"] == {"cli_version": "0.146.0", "stage": "execution"}
+    assert job["authentication_classification"] == "legacy_needs_recheck"
+    encoded = json.dumps(payload)
+    assert "SECRET_SOURCE" not in encoded
+    assert str(transcript) not in encoded
+    assert "diagnostics_json" not in encoded
 
 
 def test_status_remains_available_when_queue_initialization_fails(tmp_path, monkeypatch):
