@@ -102,6 +102,36 @@ def test_over_cap_and_batches_follow_the_caps():
     assert chunks[0]["id"] == sim.batches(["a", "b"], size=2)[0]["id"]
 
 
+def test_user_authored_and_symlinked_skills_are_left_out_of_library_passes():
+    # The provenance marker alone does not make a skill the library passes'
+    # to rewrite: a skill the user wrote carries it once the distiller has
+    # patched it, and the usage record's created_by is what says who owns it.
+    # A symlinked skill lives outside the tree, where no snapshot covers it.
+    long_desc = "L" * 400
+    inventory = [_facts("long-agent", long_desc),
+                 sim.facts_from_text("long-user", PROV.format("long-user", long_desc, "body"),
+                                     {"created_by": "user"}),
+                 sim.facts_from_text("long-linked", PROV.format("long-linked", long_desc, "body"),
+                                     None, linked=True)]
+    assert sim.over_cap(inventory) == ["long-agent"]
+    probes = [_facts("live-ui-probe", "probe"),
+              sim.facts_from_text("live-ui-probing", PROV.format("live-ui-probing", "probing", "body"),
+                                  {"created_by": "user"}),
+              sim.facts_from_text("live-ui-probes", PROV.format("live-ui-probes", "probes", "body"),
+                                  None, linked=True)]
+    assert sim.clusters(probes) == []
+
+
+def test_inventory_marks_a_symlinked_skill_as_linked(sandbox, tmp_path):
+    outside = tmp_path / "elsewhere" / "linked-one"
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text(PROV.format("linked-one", "d", "body"), encoding="utf-8")
+    (sandbox.skills / "linked-one").symlink_to(outside, target_is_directory=True)
+    sandbox.make_skill("learned-one", PROV.format("learned-one", "d", "body"))
+    inventory = sim.read_inventory(str(sandbox.skills))
+    assert [(f.name, f.linked) for f in inventory] == [("learned-one", False), ("linked-one", True)]
+
+
 def test_inventory_ignores_the_archive_and_support_dirs(sandbox):
     sandbox.make_skill("learned-one", PROV.format("learned-one", "d one", "body"))
     ref = sandbox.skills / "learned-one" / "references"

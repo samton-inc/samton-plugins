@@ -119,10 +119,23 @@ class SkillFacts:
     last_used_at: Optional[str] = None
     name_tokens: FrozenSet[str] = field(default_factory=frozenset)
     desc_tokens: FrozenSet[str] = field(default_factory=frozenset)
+    created_by: str = "agent"
+    linked: bool = False
 
     @property
     def tokens(self) -> FrozenSet[str]:
         return self.name_tokens | self.desc_tokens
+
+    @property
+    def curatable(self) -> bool:
+        """May an unattended library pass (consolidation, compression) rewrite
+        this skill? The provenance marker is not enough on its own: a skill the
+        user wrote carries it once the distiller has patched it, and the usage
+        record's `created_by` is what the curator goes by. A symlinked skill is
+        out too — its file lives outside the tree, so a rewrite lands where the
+        run's snapshot cannot roll it back."""
+        return (self.provenance and self.created_by == "agent"
+                and not self.pinned and not self.linked)
 
 
 def _frontmatter(text: str) -> str:
@@ -159,17 +172,27 @@ def _int(value) -> int:
         return 0
 
 
-def facts_from_text(name: str, text: str, record: Optional[dict] = None) -> SkillFacts:
+def facts_from_text(name: str, text: str, record: Optional[dict] = None, *,
+                    linked: bool = False) -> SkillFacts:
     fm = _frontmatter(text)
     description = frontmatter_description(text)
+    provenance = "provenance: self-improving-skills" in fm
     rec = record if isinstance(record, dict) else {}
     pinned = bool(rec.get("pinned")) or bool(re.search(r"^\s*pinned\s*:\s*true\b", fm, re.I | re.M))
+    # The curator's ownership rule: a usage record decides, and without one
+    # only the file's own provenance marker makes it the agent's.
+    if isinstance(record, dict):
+        created_by = str(rec.get("created_by", "agent"))
+    else:
+        created_by = "agent" if provenance else "user"
     return SkillFacts(
         name=name,
         description=description,
         size=len(text or ""),
-        provenance="provenance: self-improving-skills" in fm,
+        provenance=provenance,
         pinned=pinned,
+        created_by=created_by,
+        linked=linked,
         use_count=_int(rec.get("use_count")),
         view_count=_int(rec.get("view_count")),
         last_used_at=rec.get("last_used_at") or None,
@@ -200,7 +223,8 @@ def read_inventory(root: Optional[str] = None, *, records: Optional[dict] = None
                 text = fh.read()
         except OSError:
             continue
-        facts.append(facts_from_text(entry, text, recs.get(entry)))
+        linked = os.path.islink(os.path.join(base, entry)) or os.path.islink(path)
+        facts.append(facts_from_text(entry, text, recs.get(entry), linked=linked))
     return facts
 
 
@@ -263,8 +287,9 @@ def clusters(inventory: Sequence[SkillFacts], *, name_threshold: float = 0.5,
     one consolidation job. Pairs are walked in name order and an edge is
     dropped when joining would push the component over `max_chars` of SKILL.md
     or `max_members` skills — first pair wins, which the sort makes
-    deterministic. Pinned and user-authored skills are never clustered."""
-    eligible = sorted((f for f in inventory if f.provenance and not f.pinned), key=lambda f: f.name)
+    deterministic. Pinned, user-authored and symlinked skills are never
+    clustered (see `SkillFacts.curatable`)."""
+    eligible = sorted((f for f in inventory if f.curatable), key=lambda f: f.name)
     parent = {f.name: f.name for f in eligible}
     own_size = {f.name: f.size for f in eligible}
     size = dict(own_size)  # per root: bytes of the whole component
@@ -305,11 +330,11 @@ def clusters(inventory: Sequence[SkillFacts], *, name_threshold: float = 0.5,
 
 def over_cap(inventory: Sequence[SkillFacts], *, max_desc: int = 300,
              exclude: Iterable[str] = ()) -> List[str]:
-    """Learned, unpinned skills whose description exceeds `max_desc`
-    characters, minus `exclude` — the compress-job candidates."""
+    """Curatable skills whose description exceeds `max_desc` characters, minus
+    `exclude` — the compress-job candidates."""
     skip = set(exclude)
     return sorted(f.name for f in inventory
-                  if f.provenance and not f.pinned and f.name not in skip
+                  if f.curatable and f.name not in skip
                   and len(f.description) > max_desc)
 
 

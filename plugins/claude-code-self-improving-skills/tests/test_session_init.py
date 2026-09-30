@@ -191,6 +191,27 @@ def test_over_cap_skills_are_batched_into_compress_jobs(sandbox, monkeypatch):
     assert any("압축 잡 1건" in line for line in lines)
 
 
+def test_user_authored_and_symlinked_skills_are_not_batched_for_compression(sandbox, monkeypatch, tmp_path):
+    # The 0.18.2 compress pass rewrote the descriptions of two user-authored
+    # skills that carried the provenance marker, and of a skill symlinked in
+    # from ~/.agents — through the link, outside every snapshot.
+    import usage_store
+    for name in ("alpha-agent", "bravo-user"):
+        long_desc = (name.split("-")[0] + " ") * 80
+        sandbox.make_skill(name, PROV.format(name).replace("description: d", "description: " + long_desc))
+    usage_store.seed_if_missing("bravo-user", created_by="user")
+    outside = tmp_path / "elsewhere" / "charlie-linked"
+    outside.mkdir(parents=True)
+    (outside / "SKILL.md").write_text(
+        PROV.format("charlie-linked").replace("description: d", "description: " + "charlie " * 80),
+        encoding="utf-8")
+    (sandbox.skills / "charlie-linked").symlink_to(outside, target_is_directory=True)
+    _curate(sandbox, monkeypatch)
+    jobs = _queue(sandbox).list_jobs()
+    assert [j["trigger"] for j in jobs] == ["compress"]
+    assert jobs[0]["payload"]["members"] == ["alpha-agent"]
+
+
 def test_cluster_members_are_not_compressed_before_consolidation(sandbox, monkeypatch):
     long_desc = "x" * 400
     for name in ("live-ui-probe", "live-ui-probing"):

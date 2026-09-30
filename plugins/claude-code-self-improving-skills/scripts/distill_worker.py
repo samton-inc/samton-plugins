@@ -690,7 +690,7 @@ def resolve_cluster(job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     group_id, members = _job_group(job)
     inventory = skill_similarity.read_inventory(records=_usage_records())
     by_name = {f.name: f for f in inventory}
-    present = [by_name[m] for m in members if m in by_name and by_name[m].provenance and not by_name[m].pinned]
+    present = [by_name[m] for m in members if m in by_name and by_name[m].curatable]
     if len(present) >= 2:
         return {"id": group_id, "members": present, "matched": True}
     groups = skill_similarity.clusters(inventory)
@@ -753,7 +753,10 @@ def build_compress_prompt(job: Dict[str, Any], *, batch: Optional[Dict[str, Any]
         "most {1} characters that names the single workflow situation in which "
         "the skill should trigger.\n\n"
         "## Hard rules — violating any of these reverts the skill\n"
-        "- Change ONLY the `description:` line of each SKILL.md under {0}. The "
+        "- Edit ONLY the skills listed below. Every other skill under {0} — "
+        "user-authored, third-party, or symlinked in from elsewhere — is off "
+        "limits even if its description is long.\n"
+        "- Change ONLY the `description:` line of each listed SKILL.md. The "
         "body, `name`, `metadata` and every other frontmatter line stay "
         "byte-for-byte as they are; a skill whose body changed is reverted.\n"
         "- Do not add `when_to_use`, do not list adjacent situations or synonyms, "
