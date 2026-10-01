@@ -15,17 +15,22 @@ Every script in `scripts/` is a faithful 1:1 mapping to a TMap REST endpoint:
 - Default output is the **full raw API response** (compact JSON)
 - Summaries are **opt-in** via `--summarize [minimal|standard|full]`
 - Raw JSON passthrough via `--json '{...}'` for any endpoint
-- `--path` override on every subcommand if TMap endpoint path changes
+- `--path` override if a TMap endpoint path changes — available on every endpoint subcommand **except `route.py`**, whose paths are fixed in code (use `--json` there for new fields; a moved route endpoint needs a script change)
 
 Compose multi-step workflows (geocoding → routing, POI → route, arrive-by with convergence) by chaining scripts at this skill level, never by editing scripts.
 
 ## Setup: API key
 
-Before calling any endpoint, verify the API key is available. Keys are read in this order:
-1. `~/.claude/plugins/tmap/.claude/tmap.local.md` — the double `.claude` is intentional: the outer `.claude` is the user's Claude Code directory, the inner `.claude` is this plugin's local-settings directory (`.gitignore`d) with `tmap_app_key` in YAML frontmatter
-2. Environment variable `TMAP_APP_KEY`
+Before calling any endpoint, verify the API key is available. The key lives in the `tmap_app_key` field of a YAML-frontmatter file (the same file also stores onboarding status: `product_*`, `last_checked`). Lookup order (`tmap_client.py`):
+1. `$XDG_CONFIG_HOME/tmap/tmap.local.md` — default `~/.config/tmap/tmap.local.md` (standard location)
+2. `${CLAUDE_PLUGIN_ROOT}/.claude/tmap.local.md` — legacy in-plugin location, kept for backward compatibility (`.gitignore`d)
+3. Environment variable `TMAP_APP_KEY`
 
-If both are missing, the first script call raises `MissingKeyError` with instructions. On that error, follow this interactive flow:
+Only the **first of the two files that exists** is read. If that file has no `tmap_app_key`, the lookup falls through to `TMAP_APP_KEY` — the other file is not consulted.
+
+`setup_key.py` writes the key into whichever of those two files already exists (same precedence); if neither exists, it creates `$XDG_CONFIG_HOME/tmap/tmap.local.md`. It never migrates a legacy file.
+
+If no key is found, the first script call raises `MissingKeyError` with instructions. On that error, follow this interactive flow:
 
 1. Explain: "TMap API 키가 설정되어 있지 않습니다. SK오픈API에서 발급받아야 합니다."
 2. Guide to https://openapi.sk.com/ — register, create an app, register the TMap product, copy the AppKey.
@@ -33,7 +38,7 @@ If both are missing, the first script call raises `MissingKeyError` with instruc
 4. Run `python3 scripts/setup_key.py "<pasted_key>"` to save it.
 5. Retry the original request.
 
-Never write the key to logs, conversation, or any file outside `.claude/tmap.local.md`. Never commit it.
+Never write the key to logs, the conversation, or any file other than the key file `setup_key.py` chose (path above). Never commit it.
 
 ## Onboarding: 상품 활성화 확인
 
