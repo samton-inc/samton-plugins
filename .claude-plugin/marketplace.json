@@ -107,8 +107,8 @@
     {
       "name": "tmap",
       "source": "./plugins/tmap",
-      "description": "SK TMap API 37개 엔드포인트(경로/POI/지오코딩/대중교통/교통정보/경유지/지오펜싱/정적지도/매트릭스/도로매칭/유가정보)를 얇은 Python CLI 래퍼로 노출 + 온보딩 자동 감지",
-      "version": "0.1.4",
+      "description": "SK TMap API 38개 엔드포인트(경로/타임머신/POI/지오코딩/대중교통/교통정보/경유지/지오펜싱/정적지도/매트릭스/도로매칭/유가정보)를 얇은 Python CLI 래퍼로 노출 + 온보딩 자동 감지",
+      "version": "0.2.0",
       "author": {
         "name": "이정윤",
         "email": "solstice@samton.co.kr"

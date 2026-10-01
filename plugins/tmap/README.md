@@ -1,6 +1,6 @@
 # TMap Skill for Claude Code
 
-SK 티맵(TMap) API를 Claude Code에서 사용할 수 있게 해주는 스킬입니다. 한국 지역의 경로 탐색, 장소 검색, 지오코딩, 대중교통, 실시간 교통정보 등 티맵이 제공하는 거의 모든 기능(~37개 엔드포인트)을 얇은 CLI 래퍼로 노출합니다.
+SK 티맵(TMap) API를 Claude Code에서 사용할 수 있게 해주는 스킬입니다. 한국 지역의 경로 탐색, 장소 검색, 지오코딩, 대중교통, 실시간 교통정보 등 티맵이 제공하는 거의 모든 기능(~38개 엔드포인트)을 얇은 CLI 래퍼로 노출합니다.
 
 ## 왜 이 스킬이 필요한가
 
@@ -21,7 +21,7 @@ Claude는 웹 검색만으로는 한국 지역의 정확한 경로, 소요시간
 
 | 카테고리 | 스크립트 | 서브커맨드 | 엔드포인트 수 |
 |---|---|---|---|
-| 경로안내 | `route.py` | car, pedestrian, distance | 3 |
+| 경로안내 | `route.py` | car, predict(타임머신), pedestrian, distance | 4 |
 | 지오코딩 | `geocode.py` | forward, full, reverse, convert, address, near-road, postal, reverse-label | 8 |
 | POI 검색 | `poi.py` | search, detail, nearby-category, around-route, admin-area, region-code | 6 |
 | 대중교통 | `transit.py` | route, summary | 2 |
@@ -33,7 +33,7 @@ Claude는 웹 검색만으로는 한국 지역의 정확한 경로, 소요시간
 | 정적지도 | `staticmap.py` | render | 1 |
 | 지오펜싱 | `geofence.py` | spatial-search, area | 2 |
 
-**합계**: ~37개 엔드포인트
+**합계**: ~38개 엔드포인트
 
 ## API 키 발급 방법
 
@@ -188,6 +188,12 @@ cd ~/.agents/skills/tmap/scripts
 python3 route.py car --start-x 127.0276 --start-y 37.4979 \
                      --end-x 126.9236 --end-y 37.5663 \
                      --summarize standard
+
+# 예: 타임머신 — 내일 11시 도착하려면 언제 출발? (응답에 departureTime/arrivalTime)
+python3 route.py predict --start-x 126.72429747 --start-y 37.44957437 \
+                         --end-x 126.718741 --end-y 37.366246 \
+                         --arrive-by "2026-10-02T11:00:00+0900" \
+                         --summarize minimal
 
 # 예: 지오코딩
 python3 geocode.py full --full-addr "서울특별시 중구 세종대로 110"

@@ -1,6 +1,6 @@
 ---
 name: tmap
-description: This skill should be used when the user asks about Korean location, routes, or navigation — when the user says things like "경로", "길찾기", "여기서 거기까지", "○○까지 얼마나 걸려", "근처 ○○", "○○ 주소", "○○ 좌표", "주유소 가격", "대중교통으로 가는 법", "몇 시에 출발해야", "약속 시간에 맞춰", "경유지", "지도", or asks for directions, distances, POI search, geocoding, traffic, or fuel prices in Korea. Wraps SK TMap API endpoints (~37 endpoints) as thin Python CLI scripts covering routes (car/pedestrian/transit), POI search, geocoding, waypoints, traffic, fuel, matrix, map matching, static maps, and geofencing.
+description: This skill should be used when the user asks about Korean location, routes, or navigation — when the user says things like "경로", "길찾기", "여기서 거기까지", "○○까지 얼마나 걸려", "근처 ○○", "○○ 주소", "○○ 좌표", "주유소 가격", "대중교통으로 가는 법", "몇 시에 출발해야", "몇 시에 도착해", "약속 시간에 맞춰", "경유지", "지도", or asks for directions, distances, POI search, geocoding, traffic, or fuel prices in Korea. Wraps SK TMap API endpoints (~38 endpoints) as thin Python CLI scripts covering routes (car/time-machine prediction/pedestrian/transit), POI search, geocoding, waypoints, traffic, fuel, matrix, map matching, static maps, and geofencing.
 ---
 
 # TMap API Skill
@@ -17,7 +17,7 @@ Every script in `scripts/` is a faithful 1:1 mapping to a TMap REST endpoint:
 - Raw JSON passthrough via `--json '{...}'` for any endpoint
 - `--path` override if a TMap endpoint path changes — available on every endpoint subcommand **except `route.py`**, whose paths are fixed in code (use `--json` there for new fields; a moved route endpoint needs a script change)
 
-Compose multi-step workflows (geocoding → routing, POI → route, arrive-by with convergence) by chaining scripts at this skill level, never by editing scripts.
+Compose multi-step workflows (geocoding → routing, POI → route, arrive-by via the time machine) by chaining scripts at this skill level, never by editing scripts.
 
 ## Setup: API key
 
@@ -92,7 +92,7 @@ All scripts live at `${CLAUDE_PLUGIN_ROOT}/skills/tmap/scripts/` and share `tmap
 
 | Script | Category | Subcommands (endpoint 1:1) |
 |---|---|---|
-| `route.py` | 경로안내 | `car`, `pedestrian`, `distance` |
+| `route.py` | 경로안내 | `car`, `predict` (타임머신), `pedestrian`, `distance` |
 | `geocode.py` | 지오코딩 | `forward`, `full`, `reverse`, `convert`, `address`, `near-road`, `postal`, `reverse-label` |
 | `poi.py` | POI 검색 | `search`, `detail`, `nearby-category`, `around-route`, `admin-area`, `region-code` |
 | `transit.py` | 대중교통 | `route`, `summary` |
@@ -164,61 +164,59 @@ python3 scripts/transit.py route \
 
 See `references/transit.md`.
 
-### 5. Arrive-by queries (time reversal)
+### 5. Arrive-by / depart-at at a future time (타임머신)
 
-"광화문에 내일 오전 9시까지 도착하려면 판교에서 언제 출발해야 해?"
+"서울대 시흥캠퍼스에 내일 오전 11시까지 도착하려면 구월동에서 언제 출발해야 해?" / "내일 8시에 출발하면 몇 시에 도착해?"
 
-TMap's timemachine supports **native arrival-time prediction**. Use `--prediction-type arrival --prediction-time` on `route.py car`:
+Use `route.py predict` (`POST /tmap/routes/prediction`). It predicts traffic at the given future time and returns both `departureTime` and `arrivalTime`. **Never use `route.py car` for this** — `/tmap/routes` ignores prediction fields and answers with current traffic (the script now refuses those flags).
 
 ```bash
-python3 scripts/route.py car \
-  --start-x <판교 경도> --start-y <판교 위도> \
-  --end-x <광화문 경도> --end-y <광화문 위도> \
-  --prediction-type arrival \
-  --prediction-time "<YYYYMMDDHHMM>" \
-  --summarize standard
+# 도착 시각 고정 → 출발 시각 계산
+python3 scripts/route.py predict \
+  --start-name "구월4동행정복지센터" --start-x 126.72429747 --start-y 37.44957437 \
+  --end-name "서울대 시흥캠퍼스" --end-x 126.718741 --end-y 37.366246 \
+  --arrive-by "2026-10-02T11:00:00+0900" \
+  --summarize minimal
+# → {"totalDistance_m":14546,"totalTime_s":1719,...,
+#    "departureTime":"2026-10-02T10:31:21+0900","arrivalTime":"2026-10-02T11:00:00+0900"}
 
-# 예: 2026-04-11 오전 9시 도착이면 --prediction-time "202604110900"
+# 출발 시각 고정 → 도착 시각 계산
+python3 scripts/route.py predict ... --depart-at "2026-10-02T08:00:00+0900" --summarize minimal
 ```
 
-Compute the target `prediction-time` from the current date (use `date +%Y%m%d` or parse the user's phrase like "내일 오전 9시"). Never hardcode a date.
-
-The response includes the departure time. Parse it and reply with "○시 ○분에 출발하세요" plus the expected travel time. Add a reasonable buffer (10-15 min) when presenting to the user, and mention it explicitly.
+- **Use `--arrive-by` / `--depart-at`.** The raw API field is inverted relative to its name: `predictionType=departure` means "predictionTime is the *arrival* time — compute departureTime"; `predictionType=arrival` means "predictionTime is the *departure* time — compute arrivalTime" (official docs + live-verified 2026-10-01). `--arrive-by` sends `departure`, `--depart-at` sends `arrival`. If you ever use the raw `--prediction-type`, apply that inversion.
+- **Time format**: the API accepts only `YYYY-MM-DDTHH:MM:SS+0900` (no `+09:00`, no missing seconds/offset → 400). The script normalizes `2026-10-02T11:00:00+0900`, `2026-10-02 11:00`, `202610021100`, `...+09:00`, `...Z` (no offset = KST). Derive the date from today (`date +%Y-%m-%d`) plus the user's phrase ("내일 오전 11시"); never hardcode it.
+- Read `departureTime` / `arrivalTime` straight from the response; don't recompute from `totalTime_s`. Traffic is predicted for that time slot, so one call is enough — no convergence loop.
+- Default `--total-value 2` returns the summary only (no turn-by-turn). Add `--total-value 1` when the user also wants directions.
+- Reply with "○시 ○분에 출발하세요" plus the expected travel time. Suggest a 10–15 min buffer and say explicitly that it is a buffer you added.
 
 ### 6. Arrive-by with waypoints
 
-"9시까지 광화문 도착, 판교 출발, 강남역과 홍대 들러야"
+"11시까지 시흥캠퍼스 도착, 구월동 출발, 중간에 두 군데 들러야"
 
-**First attempt — pass predictionType via `--json`**:
-```bash
-python3 scripts/waypoints.py optimize-10 \
-  --start-x <판교 경도> --start-y <판교 위도> \
-  --end-x <광화문 경도> --end-y <광화문 위도> \
-  --stops-json '[
-    {"viaPointId":"1","viaPointName":"강남역","viaX":"127.0276","viaY":"37.4979"},
-    {"viaPointId":"2","viaPointName":"홍대입구역","viaX":"126.9236","viaY":"37.5563"}
-  ]' \
-  --json '{"predictionType":"arrival","predictionTime":"<YYYYMMDDHHMM>"}' \
-  --summarize standard
-```
-
-If the endpoint rejects that JSON (response error mentions unknown field), **fall back to iterative convergence**:
+**Up to 5 stops in a known order — one call.** Repeat `--via 경도,위도` in visiting order (or `--pass-list "X1,Y1_X2,Y2"`):
 
 ```bash
-# Step 1: initial estimate with a guess departure time
-python3 scripts/waypoints.py optimize-10 \
-  --start-x ... --start-y ... --end-x ... --end-y ... \
-  --stops-json '[...]' \
-  --start-time "<초기 추정 YYYYMMDDHHmm>" \
+python3 scripts/route.py predict \
+  --start-name "<출발지>" --start-x <경도> --start-y <위도> \
+  --end-name "<도착지>" --end-x <경도> --end-y <위도> \
+  --via <경유1 경도>,<경유1 위도> --via <경유2 경도>,<경유2 위도> \
+  --arrive-by "2026-10-02T11:00:00+0900" \
   --summarize minimal
-
-# Parse totalTime_s from the response, then:
-# departAt = arriveBy - totalTime_s (subtract seconds)
-# Re-run with the new --start-time
-# Repeat up to 3 iterations until totalTime_s converges (delta < 60s)
 ```
 
-Keep this convergence logic at the skill level — do not bake it into the script. When running this, briefly tell the user "경유지 반복 계산 중..." so they know why there are multiple API calls.
+This assumes no time spent at the stops. Six or more `--via` points are rejected by the API (400), and the script stops before calling it.
+
+**Visiting order not decided** — get the order first from `waypoints.py optimize-10` (the summary's `waypointOrder`), then pass the stops to `route.py predict --via ...` in that order for the time-accurate departure.
+
+**More than 5 stops, or the user stays at a stop (dwell time)** — chain legs backward:
+
+1. Split the trip into legs at the stops where time is spent (each leg may still carry up to 5 `--via` points).
+2. Last leg: `predict --arrive-by <deadline>` → its `departureTime` is when to leave the last stop.
+3. Subtract the dwell time at that stop → that is the `--arrive-by` for the previous leg.
+4. Repeat back to the origin. The first leg's `departureTime` is the answer.
+
+Each call is exact for its own time slot, so no iteration is needed. Tell the user briefly "구간별로 역산 중..." when making several calls. Keep this chaining at the skill level — do not bake it into the script.
 
 ### 7. Compare multiple starting points
 
@@ -232,6 +230,8 @@ python3 scripts/matrix.py od \
   --destinations-json '[{"lat":37.5115,"lon":127.0595}]' \
   --summarize standard
 ```
+
+The matrix reflects current traffic. For a future deadline, follow up with `route.py predict --arrive-by` for the best one or two origins.
 
 ### 8. Address ↔ coordinate
 
@@ -292,7 +292,7 @@ TMap defaults to WGS84GEO (standard lat/lon). All scripts default to `WGS84GEO` 
 Detailed per-category documentation is in `references/`. **Each reference is tagged with the product that must be enabled to use it.** Do not load a reference if its product is not `enabled` — use the onboarding flow to verify first.
 
 TMap API 기본 (`base`) 상품에 속하는 참조 (base=enabled일 때만 로드 가능):
-- **`references/route.md`** — car/pedestrian routes, searchOption values, timemachine parameters
+- **`references/route.md`** — car/pedestrian routes, searchOption values, time machine (`predict`: arrive-by/depart-at)
 - **`references/geocode.md`** — all 8 geocoding endpoints and when to use each
 - **`references/poi.md`** — POI search, category codes, around-route usage
 - **`references/waypoints.md`** — multi-waypoint and optimization endpoints, viaPoints schema

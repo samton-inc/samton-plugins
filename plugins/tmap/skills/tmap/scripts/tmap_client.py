@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import sys
@@ -216,6 +217,16 @@ def save_product_status(status: dict[str, str]) -> Path:
     return save_frontmatter(fields)
 
 
+def _maybe_gunzip(data: bytes) -> bytes:
+    """Content-Encoding 헤더 없이 gzip 본문이 오는 경우가 있어 매직 바이트로 판별해 푼다."""
+    if data[:2] == b"\x1f\x8b":
+        try:
+            return gzip.decompress(data)
+        except OSError:
+            return data
+    return data
+
+
 class TmapClient:
     """티맵 API HTTP 클라이언트. 얇은 래퍼 — 재시도, 헤더, 타임아웃만 담당."""
 
@@ -268,7 +279,7 @@ class TmapClient:
             try:
                 req = urllib.request.Request(url, data=data, method=method, headers=headers)
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    content = resp.read()
+                    content = _maybe_gunzip(resp.read())
                     ctype = resp.headers.get("Content-Type", "")
                     if "json" in ctype or accept == "application/json":
                         if not content:
@@ -277,8 +288,9 @@ class TmapClient:
                     return content
             except urllib.error.HTTPError as e:
                 body_text: Any
+                raw = b""
                 try:
-                    raw = e.read()
+                    raw = _maybe_gunzip(e.read())
                     body_text = json.loads(raw.decode("utf-8"))
                 except Exception:
                     body_text = raw.decode("utf-8", errors="replace") if raw else ""
@@ -314,7 +326,8 @@ def summarize_route(resp: dict, level: str = "standard", turns: int | None = Non
     """티맵 경로 응답 요약. 자동차/보행자/경유지 최적화 세 가지 응답 구조를 모두 처리.
 
     구조 차이:
-    - route.py car/pedestrian: totalDistance/totalTime이 features[0].properties에 존재
+    - route.py car/pedestrian/predict: totalDistance/totalTime이 features[0].properties에 존재
+      (predict는 departureTime/arrivalTime도 함께 — 요약에 그대로 포함)
     - waypoints.py optimize-*: totalDistance/totalTime이 top-level properties에 존재, features의 properties는 경유지 정보
 
     level: minimal | standard | full
@@ -344,14 +357,22 @@ def summarize_route(resp: dict, level: str = "standard", turns: int | None = Non
         "totalFare_krw": _maybe_int(props.get("totalFare")),
         "taxiFare_krw": _maybe_int(props.get("taxiFare")),
     }
+    # 타임머신(route.py predict) 응답에만 있음
+    for key in ("departureTime", "arrivalTime"):
+        if props.get(key):
+            out[key] = props[key]
 
     if level == "minimal":
         return out
 
     points = [f for f in features if (f.get("geometry") or {}).get("type") == "Point"]
     if points:
-        out["startPoint"] = points[0].get("geometry", {}).get("coordinates")
-        out["endPoint"] = points[-1].get("geometry", {}).get("coordinates")
+        # 경유지가 있으면 도착(E) Point 뒤에 경유지 마커 Point가 덧붙어 오므로 pointType을 우선한다
+        by_type = {}
+        for f in points:
+            by_type.setdefault((f.get("properties") or {}).get("pointType"), f)
+        out["startPoint"] = (by_type.get("S") or points[0]).get("geometry", {}).get("coordinates")
+        out["endPoint"] = (by_type.get("E") or points[-1]).get("geometry", {}).get("coordinates")
 
     # 경유지 순서 (waypoints optimize 응답만): Point feature에 viaPointName이 있으면 수집
     # 일반 경로(route.py) 응답에는 viaPointName이 없으므로 이 블록이 실행되지 않음
