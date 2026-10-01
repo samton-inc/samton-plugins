@@ -139,4 +139,4 @@ python3 waypoints.py multi-30 \
 - 응답이 매우 큼 (경유지 수에 비례). 사용자 응답에는 `--summarize` 필수
 - 차종과 검색 옵션은 모든 구간에 동일 적용
 - `startTime`은 과거 시각도 허용되지만 미래 시각이 일반적
-- 타임머신 예측(`predictionType=arrival`)은 waypoints 엔드포인트에서 지원 여부 불확실 — 실패 시 SKILL.md의 반복 수렴 패턴 사용
+- 출발·도착 시각 예측(타임머신)은 waypoints 엔드포인트가 아니라 `route.py predict`(`/tmap/routes/prediction`)로 한다. 경유지 최대 5개, 순서 고정. 최적 순서가 필요하면 `optimize-*`로 순서만 구한 뒤 그 순서로 `predict --via ...` 호출 (SKILL.md 6번 흐름)
