@@ -285,6 +285,31 @@ def seed_if_missing(name, created_by="agent"):
             _save(data)
 
 
+def seed_many(seeds):
+    """Create records for skills that have none, in one locked write.
+
+    `seeds` maps name -> {"created_at": iso, "created_by": ..., **extra}.
+    A name that already has a record is left alone, so a concurrent hook that
+    seeded it first keeps its counters. Returns the names actually seeded."""
+    if not seeds:
+        return []
+    seeded = []
+    with _Lock():
+        data = load()
+        for name, fields in seeds.items():
+            if not name or isinstance(data.get(name), dict):
+                continue
+            fields = dict(fields)
+            rec = empty_record(created_at=fields.pop("created_at", None),
+                               created_by=fields.pop("created_by", "agent"))
+            rec.update(fields)
+            data[name] = rec
+            seeded.append(name)
+        if seeded:
+            _save(data)
+    return seeded
+
+
 def set_fields(name, **fields):
     """Set arbitrary record fields (state, pinned, absorbed_into, created_by...)."""
     if not name:

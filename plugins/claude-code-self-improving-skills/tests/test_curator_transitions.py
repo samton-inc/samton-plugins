@@ -253,3 +253,91 @@ def test_prune_preview_lists_use_count(sandbox):
     cand = {c["name"]: c for c in res["candidates"]}
     assert "dusty-skill" in cand and cand["dusty-skill"]["use_count"] == 1
     assert (sandbox.skills / "dusty-skill").is_dir()  # preview only
+
+
+# --- skills that arrived without a usage record ------------------------------
+
+PROV = ("---\nname: {0}\ndescription: d\nmetadata:\n"
+        "  provenance: self-improving-skills\n---\nbody\n")
+
+
+def _arrived(sandbox, name, file_age_days, text=None):
+    """A skill copied in wholesale: an old file, and no usage record because no
+    hook saw it arrive (226 of them in the 2026-10 library)."""
+    import os
+    import time
+    d = sandbox.make_skill(name, text if text is not None else PROV.format(name))
+    old = time.time() - file_age_days * 86400
+    os.utime(d / "SKILL.md", (old, old))
+    return d
+
+
+def test_a_skill_without_a_record_is_not_brand_new_forever(sandbox):
+    # Through 0.18.3 its idle clock fell back to `now` on every run, so it was
+    # zero days idle daily and never aged at all.
+    _arrived(sandbox, "copied-in", 100)
+    summary = sandbox.curator.run()
+    assert summary["first_seen"] == [{"name": "copied-in", "created_by": "agent"}]
+    rec = sandbox.usage_store.all_records()["copied-in"]
+    assert rec["first_seen_at"] and rec["created_by"] == "agent"
+    assert rec["created_at"] < _iso_days_ago(99)  # the file's age, kept for /prune-skills
+    # Tracking begins today, so nothing moves on the strength of idleness
+    # nobody watched...
+    assert summary["archived"] == [] and summary["stale"] == []
+    assert (sandbox.skills / "copied-in").is_dir()
+    # ...and it is tracked once, not re-seeded every run.
+    assert sandbox.curator.run()["first_seen"] == []
+
+
+def test_a_tracked_skill_ages_from_the_day_tracking_began(sandbox):
+    _arrived(sandbox, "copied-in", 100)
+    sandbox.curator.run()
+    sandbox.usage_store.set_fields("copied-in", first_seen_at=_iso_days_ago(46))
+    summary = sandbox.curator.run()
+    assert [x["name"] for x in summary["archived"]] == ["copied-in"]
+    assert (sandbox.skills / ".archive" / "copied-in").is_dir()
+
+
+def test_use_after_tracking_began_still_resets_the_clock(sandbox):
+    _arrived(sandbox, "copied-in", 100)
+    sandbox.curator.run()
+    sandbox.usage_store.set_fields("copied-in", first_seen_at=_iso_days_ago(60),
+                                   last_used_at=_iso_days_ago(3))
+    assert sandbox.curator.run()["archived"] == []
+
+
+def test_a_record_less_skill_without_the_marker_is_tracked_as_the_users(sandbox):
+    _arrived(sandbox, "hand-made", 300, text="---\nname: hand-made\ndescription: d\n---\nbody\n")
+    summary = sandbox.curator.run()
+    assert summary["first_seen"] == [{"name": "hand-made", "created_by": "user"}]
+    sandbox.usage_store.set_fields("hand-made", first_seen_at=_iso_days_ago(300))
+    summary = sandbox.curator.run()
+    assert summary["archived"] == [] and "hand-made" in summary["skipped_user"]
+
+
+def test_a_dry_run_starts_tracking_nothing(sandbox):
+    _arrived(sandbox, "copied-in", 100)
+    summary = sandbox.curator.run(dry_run=True)
+    assert summary["first_seen"] == [{"name": "copied-in", "created_by": "agent"}]
+    assert "copied-in" not in sandbox.usage_store.all_records()
+
+
+def test_the_prune_preview_shows_a_newly_tracked_skill_by_its_file_age(sandbox):
+    # The automatic pass waits; a person who previews and confirms need not.
+    _arrived(sandbox, "copied-in", 100)
+    _arrived(sandbox, "recent-copy", 10)
+    res = sandbox.curator.prune_idle(45, dry_run=True)
+    cand = {c["name"]: c for c in res["candidates"]}
+    assert list(cand) == ["copied-in"]
+    assert cand["copied-in"]["idle_days"] >= 99 and cand["copied-in"]["untracked_age"] is True
+    assert "copied-in" not in sandbox.usage_store.all_records()  # preview writes nothing
+    assert (sandbox.skills / "copied-in").is_dir()
+    sandbox.curator.prune_idle(45, dry_run=False)
+    assert (sandbox.skills / ".archive" / "copied-in").is_dir()
+    assert (sandbox.skills / "recent-copy").is_dir()
+
+
+def test_a_skill_with_real_activity_has_no_untracked_age_flag(sandbox):
+    _seed(sandbox, "dusty-skill", 50)
+    cand = sandbox.curator.prune_idle(30, dry_run=True)["candidates"]
+    assert cand == [{"name": "dusty-skill", "idle_days": 50, "use_count": 0}]

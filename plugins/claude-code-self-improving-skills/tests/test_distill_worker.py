@@ -665,6 +665,45 @@ def test_a_child_that_writes_a_near_duplicate_gets_a_candidate_not_a_skill(worke
     assert tray.exists() and candidate["proposed_change"] == "quarantined at {0}".format(tray)
 
 
+def _candidate_child(tmp_path, name, reason, proposal):
+    """A child that writes nothing and hands one technique back as a candidate —
+    what the cap prompt tells it to do."""
+    return _fake_claude(tmp_path, textwrap.dedent("""\
+        import json
+        print(json.dumps({{"type": "result", "is_error": False, "subtype": "success",
+                          "structured_output": {{"status": "nothing_to_save", "skills": [],
+                            "candidates": [{{"name": {0!r}, "reason": {1!r},
+                                            "proposed_change": {2!r}}}],
+                            "summary": "library at its cap"}}}}))
+        """).format(name, reason, proposal))
+
+
+def test_a_technique_the_child_returns_as_a_candidate_lands_in_the_tray(worker, queue, sandbox, tmp_path):
+    # Through 0.18.3 it stayed in the job's result row, which nothing reads back.
+    claude = _candidate_child(tmp_path, "apt-dry-run-against-new-repo",
+                              "The library is at its cap", "Add an apt section")
+    transcript = _transcript(tmp_path / "t.jsonl", _chain("user", "assistant"))
+    _enqueue(queue, transcript, 2)
+    _run(worker, queue, claude)
+    job = queue.list_jobs()[0]
+    note = sandbox.home / ".claude" / "self-improve" / "candidates" / "apt-dry-run-against-new-repo" / "CANDIDATE.md"
+    assert job["status"] == "done" and note.exists()
+    text = note.read_text(encoding="utf-8")
+    assert "The library is at its cap" in text and "Add an apt section" in text
+    assert "distill job: {0}".format(job["id"]) in text
+
+
+def test_a_merge_a_library_pass_declined_is_not_parked(worker, queue, sandbox, tmp_path):
+    # A consolidation pass's candidates are merges it left alone, repeated
+    # weekly — not techniques waiting for a home.
+    for name in ("live-ui-probe", "live-ui-probing"):
+        sandbox.make_skill(name, PROV_SKILL.format(name, "Use this when probing the live ui"))
+    _enqueue_library(queue, "curate", "feedbeef", ["live-ui-probe", "live-ui-probing"])
+    _run(worker, queue, _candidate_child(tmp_path, "live-ui-probe", "not one skill", "leave it"))
+    assert queue.list_jobs()[0]["status"] == "done"
+    assert not (sandbox.home / ".claude" / "self-improve" / "candidates").exists()
+
+
 def test_the_child_is_told_which_existing_skills_are_nearest(worker, queue, sandbox, tmp_path):
     sandbox.make_skill("captcha-retry-budget",
                        PROV_SKILL.format("captcha-retry-budget", "Use this when a captcha keeps failing and retries are counted"))

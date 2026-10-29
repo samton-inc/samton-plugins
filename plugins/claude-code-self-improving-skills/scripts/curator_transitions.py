@@ -36,6 +36,7 @@ import sis_io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import skill_paths  # noqa: E402
+import skill_similarity  # noqa: E402
 import usage_store  # noqa: E402
 try:
     import curator_backup
@@ -246,18 +247,82 @@ def mark_curated():
         return False
 
 
-def _idle_days(rec, now):
+def _idle_days(rec, now, observed_only=True):
     """Days since the most recent activity (use / view / a patch by a person),
     else since created_at. `last_patched_at` is left out on purpose: the
     background distiller is the main author of patches, and its activity says
-    nothing about whether anyone needs the skill."""
+    nothing about whether anyone needs the skill.
+
+    A record the curator backfilled carries `first_seen_at`, the day tracking
+    began, and a `created_at` taken from the file. The automatic pass
+    (`observed_only`) never ages a skill from before tracking began — idleness
+    nobody watched is not evidence enough to move a skill unattended. A
+    person running /prune-skills sees the file's age instead, in a preview."""
     latest = None
     for k in ("last_used_at", "last_viewed_at", "last_user_patched_at"):
         d = _parse(rec.get(k))
         if d and (latest is None or d > latest):
             latest = d
     anchor = latest or _parse(rec.get("created_at")) or now
+    if latest is None and observed_only:
+        seen = _parse(rec.get("first_seen_at"))
+        if seen and seen > anchor:
+            anchor = seen
     return (now - anchor).days
+
+
+def _file_time(name):
+    """The earliest timestamp a SKILL.md carries: its birth where the OS keeps
+    one, else its last write."""
+    try:
+        st = os.stat(os.path.join(SKILLS_DIR, name, "SKILL.md"))
+    except OSError:
+        return None
+    t = min(st.st_mtime, getattr(st, "st_birthtime", st.st_mtime))
+    return datetime.fromtimestamp(t, timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _start_tracking(learned, records, now, dry_run):
+    """Give each learned skill without a usage record one, and return them.
+
+    Through 0.18.3 such a skill had no `created_at`, so `_idle_days` fell back
+    to `now` and it was zero days idle on every run: a library that gained
+    226 skills by a bulk copy (no hook saw them arrive) reported "nothing to
+    clean" daily while the cap refused every new skill. Owner by
+    `skill_similarity.unrecorded_owner`, the rule the cap counts with. The
+    returned records are also put in `records` so this run judges them; a dry
+    run writes nothing."""
+    started = {}
+    stamp = now.replace(microsecond=0).isoformat()
+    for name in sorted(learned):
+        if name in records:
+            continue
+        try:
+            with open(os.path.join(SKILLS_DIR, name, "SKILL.md"), encoding="utf-8", errors="ignore") as fh:
+                text = fh.read(8192)
+        except Exception:
+            continue
+        started[name] = {
+            "created_at": _file_time(name) or stamp,
+            "created_by": skill_similarity.unrecorded_owner(text),
+            "first_seen_at": stamp,
+        }
+    if started and not dry_run:
+        try:
+            seeded = set(usage_store.seed_many(started))
+        except Exception:
+            seeded = set()
+        # A concurrent hook may have seeded one first; judge it by that record.
+        fresh = usage_store.all_records() if len(seeded) < len(started) else {}
+        for name in list(started):
+            if name not in seeded and name in fresh:
+                records[name] = fresh[name]
+                del started[name]
+    for name, fields in started.items():
+        rec = usage_store.empty_record(created_at=fields["created_at"], created_by=fields["created_by"])
+        rec["first_seen_at"] = fields["first_seen_at"]
+        records[name] = rec
+    return started
 
 
 def _use_count(rec):
@@ -346,19 +411,27 @@ def _skip_reason(name, rec):
 
 def prune_idle(days, dry_run=True):
     """Bulk-archive unpinned, agent-distilled skills idle >= `days`. dry_run=True
-    (default) only previews candidates — mutate nothing."""
+    (default) only previews candidates — mutate nothing.
+
+    A person reads this preview before anything moves, so a skill the curator
+    only started tracking recently is aged from its file here (`untracked_age`
+    marks those rows), not from the day tracking began as the automatic pass
+    does."""
     now = _now()
     records = usage_store.all_records()
     learned = _learned_names()
+    _start_tracking(learned, records, now, dry_run)
     candidates = []
     for name in sorted(learned):
         rec = records.get(name, {})
         if _skip_reason(name, rec) is not None:
             continue
-        idle = _idle_days(rec, now)
+        idle = _idle_days(rec, now, observed_only=False)
         if idle >= days:
-            candidates.append({"name": name, "idle_days": idle,
-                               "use_count": _use_count(rec)})
+            row = {"name": name, "idle_days": idle, "use_count": _use_count(rec)}
+            if _idle_days(rec, now) < idle:
+                row["untracked_age"] = True
+            candidates.append(row)
     result = {"days": days, "dry_run": dry_run, "candidates": candidates}
     if not dry_run and candidates:
         if curator_backup is not None:
@@ -375,9 +448,11 @@ def run(dry_run=False):
     now = _now()
     records = usage_store.all_records()
     learned = _learned_names()
+    started = _start_tracking(learned, records, now, dry_run)
     summary = {
         "stale": [], "archived": [], "reactivated": [],
         "skipped_pinned": [], "skipped_user": [],
+        "first_seen": [{"name": n, "created_by": f["created_by"]} for n, f in sorted(started.items())],
         "stale_days": stale_days, "archive_days": archive_days,
         "dry_run": dry_run, "ran_at": now.replace(microsecond=0).isoformat(),
     }
@@ -438,8 +513,15 @@ def _write_report(summary):
                 len(summary["archived"]), len(summary["stale"]), len(summary["reactivated"])),
             "- skipped (pinned): {0} | skipped (user-authored): {1}".format(
                 len(summary["skipped_pinned"]), len(summary["skipped_user"])),
+            "- tracking started (no usage record before this run): {0}".format(
+                len(summary.get("first_seen") or [])),
             "",
         ]
+        if summary.get("first_seen"):
+            lines.append("## Tracking started (aged from today, not from the file)")
+            lines += ["- {0} (created_by {1})".format(x["name"], x["created_by"])
+                      for x in summary["first_seen"]]
+            lines.append("")
         if summary["archived"]:
             lines.append("## Archived (moved to .archive/)")
             lines += ["- {0} (idle {1}d)".format(x["name"], x["idle_days"]) for x in summary["archived"]]

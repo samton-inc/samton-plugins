@@ -1736,11 +1736,11 @@ def _prompt_context(job: Dict[str, Any], evidence: Evidence) -> Dict[str, Any]:
         inventory = skill_similarity.read_inventory(records=records)
         text = "{0}\n{1}".format(evidence.text, job.get("last_assistant_message") or "")
         count = skill_similarity.learned_count(inventory)
-        cap = skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+        cap = skill_similarity.library_cap()
         return {
             "neighbours": skill_similarity.relevant_to_text(
                 text, inventory, limit=skill_paths.int_env("SIS_PROMPT_NEIGHBOURS", 15)),
-            "library_full": cap > 0 and count >= cap,
+            "library_full": skill_similarity.at_cap(count, cap),
             "library_count": count,
             "library_cap": cap,
         }
@@ -2022,6 +2022,8 @@ def _run_job(
         return {"job_id": job_id, **outcome}
 
     skill_guard.stamp_provenance(guard["installed"])
+    if not library_pass:
+        _park_reported_candidates(structured.get("candidates"), job_id)
     merged = _merge_guard(structured, guard, _denials(result.stdout))
     if ceiling_note:
         merged["summary"] = (str(merged.get("summary") or "") + ceiling_note)[:4000]
@@ -2081,6 +2083,23 @@ def _violation_result(guard: Dict[str, Any], code: str, paths: List[str]) -> Dic
             "{0}: {1}".format(item["name"], item["reason"]) for item in guard["rolled_back"]
         ]
     return body
+
+
+def _park_reported_candidates(candidates: Any, job_id: int) -> None:
+    """Put each technique the child returned as a candidate in the tray.
+
+    The cap prompt tells the child to hand such a technique to "a human to
+    place", but the job's result row was the only place it landed. Library
+    passes are left out: their candidates are merges they declined, not new
+    techniques, and they repeat every week."""
+    if not isinstance(candidates, list):
+        return
+    for item in candidates:
+        if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+            continue
+        skill_guard.park_candidate_note(
+            str(item.get("name")), str(item.get("reason") or ""),
+            str(item.get("proposed_change") or ""), job_id=job_id)
 
 
 def _merge_guard(

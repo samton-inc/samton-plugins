@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import stat
 from typing import Any, Dict, List, Optional, Set
@@ -349,9 +350,9 @@ def _new_skill_gate(name: str, text: str, inventory: List[skill_similarity.Skill
     own match; a skill the same run PATCHED still counts — "patch foo and add
     foo-v2" is exactly the shape this gate exists to catch.
     """
-    cap = skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+    cap = skill_similarity.library_cap()
     count = skill_similarity.learned_count(inventory)
-    if cap > 0 and count >= cap:
+    if skill_similarity.at_cap(count, cap):
         return "library_full:{0}/{1}".format(count, cap)
     hit = skill_similarity.duplicate_of(
         name, skill_similarity.frontmatter_description(text), inventory,
@@ -386,6 +387,56 @@ def _quarantine(name: str, data: Optional[bytes]) -> Optional[str]:
         return target
     except OSError:
         return None
+
+
+def _candidate_slug(name: str) -> str:
+    """A tray folder name from a free-text candidate name. Children write
+    names like "foo-bar (or a section in baz)", which must not become a path."""
+    slug = "-".join(part for part in re.split(r"[^a-z0-9]+", str(name or "").lower()) if part)
+    return slug[:64].strip("-") or "candidate"
+
+
+def park_candidate_note(name: str, reason: str, proposed_change: str,
+                        job_id: Optional[int] = None) -> Optional[str]:
+    """Keep a technique the child returned as a candidate — it was told not to
+    write a skill (library at its cap, or no existing skill could hold it) —
+    in the tray as CANDIDATE.md, next to the quarantined SKILL.md files.
+
+    Before this, the note lived only in the job's result row, which nothing
+    reads back to a person: /distill-status counted the tray, and SessionStart
+    stays silent about finished jobs. Same idempotency as `_quarantine`."""
+    lines = ["# {0}".format(str(name or "").strip() or "candidate"), ""]
+    if job_id is not None:
+        lines.append("- distill job: {0}".format(job_id))
+    lines += ["", "## Why it was not written as a skill", "", str(reason or "").strip(),
+              "", "## Proposed change", "", str(proposed_change or "").strip(), ""]
+    data = "\n".join(lines).encode("utf-8")
+    try:
+        folder = os.path.join(candidates_dir(), _candidate_slug(name))
+        os.makedirs(folder, exist_ok=True)
+        target = os.path.join(folder, "CANDIDATE.md")
+        existing = _read(target)
+        if existing == data:
+            return target
+        if existing is not None:
+            target = os.path.join(folder, "CANDIDATE-{0}.md".format(_digest(data)[:8]))
+        with open(target, "wb") as handle:
+            handle.write(data)
+        return target
+    except OSError:
+        return None
+
+
+def parked_candidates() -> List[str]:
+    """Names of the tray's entries, whether a quarantined SKILL.md or a note."""
+    tray = candidates_dir()
+    try:
+        return sorted(
+            entry for entry in os.listdir(tray)
+            if not entry.startswith(".") and os.path.isdir(os.path.join(tray, entry))
+        ) if os.path.isdir(tray) else []
+    except OSError:
+        return []
 
 
 def _has_valid_skill(owner: str) -> bool:
