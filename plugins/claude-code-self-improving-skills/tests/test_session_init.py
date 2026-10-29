@@ -29,6 +29,115 @@ def _init(sandbox, env=None):
     return json.loads(out)["hookSpecificOutput"] if out.strip() else {}
 
 
+def _init_raw(sandbox, env=None):
+    """The whole hook output, systemMessage included."""
+    run_env = {"SIS_REVIEW_MODE": "background", "SIS_TEST_NO_LAUNCH": "1"}
+    run_env.update(env or {})
+    out = _run_script(sandbox.home, "session_init.py", {"source": "startup"}, run_env)
+    return json.loads(out) if out.strip() else {}
+
+
+def _learned(sandbox, count, stem="learned"):
+    for i in range(count):
+        name = "{0}-{1}".format(stem, i)
+        sandbox.make_skill(name, PROV.format(name))
+
+
+# --- library cap notice -----------------------------------------------------
+
+def test_a_library_over_its_cap_is_announced_to_the_user(sandbox):
+    # 0.18.3 printed "247 learned skills" and nothing else while the guard
+    # refused every new skill against a cap of 100.
+    _learned(sandbox, 3)
+    out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "3"})
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert "현재 학습된 스킬 3개가 ~/.claude/skills 에 누적되어 있습니다 (상한 3개)." in context
+    assert "상한 3개(SIS_MAX_LEARNED_SKILLS)를 넘어 새 스킬 생성이 막혀 있습니다" in context
+    assert "/prune-skills" in context
+    assert "상한 3개를 넘어 새 스킬이 만들어지지 않고" in out["systemMessage"]
+
+
+def test_the_user_hears_about_the_cap_once_a_day_while_the_model_hears_every_time(sandbox):
+    _learned(sandbox, 3)
+    assert "systemMessage" in _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "3"})
+    again = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "3"})
+    assert "systemMessage" not in again
+    assert "새 스킬 생성이 막혀 있습니다" in again["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_library_near_its_cap_gets_a_warning_before_creation_stops(sandbox):
+    _learned(sandbox, 9)
+    out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "10"})
+    assert "상한에 가까워졌습니다(9/10" in out["hookSpecificOutput"]["additionalContext"]
+    assert "상한 10개에 가까워졌습니다" in out["systemMessage"]
+
+
+def test_a_library_well_under_its_cap_says_nothing_about_it(sandbox):
+    _learned(sandbox, 2)
+    out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "10"})
+    assert "(상한 10개)" in out["hookSpecificOutput"]["additionalContext"]
+    assert "가까워졌습니다" not in out["hookSpecificOutput"]["additionalContext"]
+    assert "systemMessage" not in out
+
+
+def test_the_notice_counts_what_the_guard_counts(sandbox):
+    # A marker-stamped skill the user owns is not counted by the guard, so the
+    # notice must not count it either.
+    _learned(sandbox, 2)
+    sandbox.make_skill("hand-stamped", PROV.format("hand-stamped"))
+    sandbox.usage_store.seed_if_missing("hand-stamped", created_by="user")
+    out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "3"})
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert "현재 학습된 스킬 2개" in context
+    assert "막혀 있습니다" not in context
+
+
+def test_a_cap_of_zero_means_no_cap_notice(sandbox):
+    _learned(sandbox, 3)
+    out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "0"})
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert "현재 학습된 스킬 3개가 ~/.claude/skills 에 누적되어 있습니다." in context
+    assert "상한" not in context and "systemMessage" not in out
+
+
+def test_the_cap_notice_counts_what_is_waiting_in_the_tray(sandbox):
+    import skill_guard
+    importlib.reload(skill_guard)
+    _learned(sandbox, 3)
+    skill_guard.park_candidate_note("reference-matched-music-mix", "cap", "p")
+    out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "3"})
+    assert "(현재 1건, /distill-status)" in out["hookSpecificOutput"]["additionalContext"]
+    assert "후보함에만 쌓입니다(현재 1건)" in out["systemMessage"]
+
+
+def test_an_over_cap_library_is_not_reported_as_having_nothing_to_clean(sandbox, monkeypatch):
+    import session_init
+    monkeypatch.setenv("SIS_STATE_DIR", str(sandbox.home / ".claude" / "self-improve"))
+    importlib.reload(session_init)
+    _learned(sandbox, 2)
+    lines = []
+    session_init._run_curator({}, lines, over_cap=True)
+    assert not any("정리할 미사용 스킬이 없습니다" in line for line in lines)
+    assert any("상한을 넘은 상태입니다" in line for line in lines)
+    lines = []
+    session_init._run_curator({}, lines, over_cap=False)
+    assert any("정리할 미사용 스킬이 없습니다" in line for line in lines)
+
+
+def test_the_curator_reports_skills_it_starts_tracking(sandbox, monkeypatch):
+    import session_init
+    monkeypatch.setenv("SIS_STATE_DIR", str(sandbox.home / ".claude" / "self-improve"))
+    importlib.reload(session_init)
+    _learned(sandbox, 2)  # no usage record: arrived without any hook seeing them
+    lines = []
+    session_init._run_curator({}, lines)
+    assert any("사용 기록이 없던 학습 스킬 2개" in line and "당장 옮기는 스킬은 없습니다" in line
+               for line in lines)
+    lines = []
+    session_init._run_curator({}, lines)  # already tracked: no repeat
+    assert not any("사용 기록이 없던" in line for line in lines)
+
+
 def _queue(sandbox):
     import distill_queue
     importlib.reload(distill_queue)

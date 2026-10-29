@@ -172,6 +172,16 @@ def _int(value) -> int:
         return 0
 
 
+def unrecorded_owner(text: str) -> str:
+    """Who owns a skill that has no usage record: "agent" or "user".
+
+    The one rule for every consumer that has to decide without a record — the
+    cap count, the clustering, and the curator when it starts tracking such a
+    skill. Without a record only the file's own provenance marker makes it the
+    agent's."""
+    return "agent" if "provenance: self-improving-skills" in _frontmatter(text) else "user"
+
+
 def facts_from_text(name: str, text: str, record: Optional[dict] = None, *,
                     linked: bool = False) -> SkillFacts:
     fm = _frontmatter(text)
@@ -179,12 +189,12 @@ def facts_from_text(name: str, text: str, record: Optional[dict] = None, *,
     provenance = "provenance: self-improving-skills" in fm
     rec = record if isinstance(record, dict) else {}
     pinned = bool(rec.get("pinned")) or bool(re.search(r"^\s*pinned\s*:\s*true\b", fm, re.I | re.M))
-    # The curator's ownership rule: a usage record decides, and without one
-    # only the file's own provenance marker makes it the agent's.
+    # The curator's ownership rule: a usage record decides; without one,
+    # unrecorded_owner does.
     if isinstance(record, dict):
         created_by = str(rec.get("created_by", "agent"))
     else:
-        created_by = "agent" if provenance else "user"
+        created_by = unrecorded_owner(text)
     return SkillFacts(
         name=name,
         description=description,
@@ -229,7 +239,24 @@ def read_inventory(root: Optional[str] = None, *, records: Optional[dict] = None
 
 
 def learned_count(inventory: Sequence[SkillFacts]) -> int:
-    return sum(1 for f in inventory if f.provenance)
+    """The learned skills the library cap counts: this plugin's marker AND the
+    agent's by the curator's ownership rule. A skill the user wrote carries the
+    marker too once the PostToolUse hook has seen it, but no curator pass may
+    archive or merge it — counting it would build a wall nothing can lower."""
+    return sum(1 for f in inventory if f.provenance and f.created_by == "agent")
+
+
+def library_cap() -> int:
+    """SIS_MAX_LEARNED_SKILLS; 0 or less turns the cap off."""
+    return skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+
+
+def at_cap(count: int, cap: Optional[int] = None) -> bool:
+    """Whether a library of `count` learned skills refuses new ones. One
+    definition for the guard, the worker prompt, and the SessionStart notice,
+    so the notice can never say "fine" while the gate says "full"."""
+    cap = library_cap() if cap is None else cap
+    return cap > 0 and count >= cap
 
 
 def _similar(a: SkillFacts, b: SkillFacts, name_threshold: float, desc_threshold: float) -> Optional[Tuple[float, str]]:

@@ -4,7 +4,10 @@
 Injects a small amount of additionalContext at session start so the agent:
   1. knows the self-improvement loop is active and how to feed it (the advisory
      nudge — Hermes' SKILLS_GUIDANCE analogue),
-  2. is aware of how many learned skills already exist under ~/.claude/skills, and
+  2. is aware of how many learned skills already exist under ~/.claude/skills,
+     and — from 90% of SIS_MAX_LEARNED_SKILLS on — that new skills are about
+     to be, or already are, refused (the user hears this too, once a day,
+     through systemMessage), and
   3. is reminded to run /curate-skills when the learned-skill library has grown
      and hasn't been consolidated in a while (the Hermes 7-day curator analogue,
      here event-gated rather than wall-clock).
@@ -20,6 +23,7 @@ Config:
   SIS_CURATE_MAX_JOBS    consolidation cluster jobs queued per pass (default 5)
   SIS_COMPRESS_MAX_JOBS  description-compression batch jobs queued per pass (default 6)
   SIS_AUTO_CURATE        "0" turns the background library passes off
+  SIS_MAX_LEARNED_SKILLS the library cap the notice compares against (default 100)
 
 Two clocks since 0.18.0. The time-based transitions are free and deterministic,
 so they run daily; the LLM passes (consolidation clusters, compression batches)
@@ -48,10 +52,14 @@ CURATOR_STATE = os.path.join(STATE_DIR, "curator_state.json")
 # Kept out of curator_state.json: the curator seeds that file with a fresh
 # dict on first run, which would wipe whatever we stored alongside it.
 DISTILL_SEEN = os.path.join(STATE_DIR, "distill_seen.json")
+# Same reason: the day the library-cap notice last reached the user.
+NOTICES = os.path.join(STATE_DIR, "notices.json")
+# Share of the cap at which the notice starts, before creation is refused.
+NEAR_CAP = 0.9
 PROVENANCE_KEY = "self-improving-skills"  # marker we write into learned SKILL.md frontmatter
 
 
-def emit_context(text, reload_skills=False) -> NoReturn:
+def emit_context(text, reload_skills=False, system_message=None) -> NoReturn:
     if text:
         payload = {
             "hookEventName": "SessionStart",
@@ -62,7 +70,12 @@ def emit_context(text, reload_skills=False) -> NoReturn:
             # the background worker installed since the last session would
             # otherwise only become available one session later.
             payload["reloadSkills"] = True
-        sys.stdout.write(json.dumps({"hookSpecificOutput": payload}, ensure_ascii=False))
+        out = {"hookSpecificOutput": payload}
+        if system_message:
+            # additionalContext reaches the model only; a state the user has to
+            # act on goes out on the channel the user actually sees too.
+            out["systemMessage"] = system_message
+        sys.stdout.write(json.dumps(out, ensure_ascii=False))
     sys.exit(0)
 
 
@@ -232,6 +245,82 @@ def _count_learned_skills():
     return learned
 
 
+def _library_status():
+    """(learned, cap) by the rule the guard refuses new skills with, or None.
+
+    `_count_learned_skills` only looks for the marker; the guard also asks the
+    usage record who owns the skill. Through 0.18.3 this note printed the
+    first number and never compared it with anything, so a library 2.5x over
+    the cap read the same as one at half of it."""
+    try:
+        import skill_similarity
+        try:
+            import usage_store
+            records = usage_store.all_records()
+        except Exception:
+            records = {}
+        inventory = skill_similarity.read_inventory(SKILLS_DIR, records=records)
+        return skill_similarity.learned_count(inventory), skill_similarity.library_cap()
+    except Exception:
+        return None
+
+
+def _parked_count():
+    try:
+        import skill_guard
+        return len(skill_guard.parked_candidates())
+    except Exception:
+        return 0
+
+
+def _cap_notice(learned, cap):
+    """(context line, user message) for a library at or near its cap, or
+    (None, None). The user message is the same news in fewer words."""
+    if cap <= 0 or learned < cap * NEAR_CAP:
+        return None, None
+    if learned < cap:
+        return (
+            "학습 스킬이 상한에 가까워졌습니다({0}/{1}, SIS_MAX_LEARNED_SKILLS). 상한에 닿으면 "
+            "백그라운드 증류는 새 스킬을 만들지 않고 기존 스킬 patch 와 후보함 보관만 합니다.".format(learned, cap),
+            "[self-improving-skills] 학습 스킬 {0}개 — 상한 {1}개에 가까워졌습니다. "
+            "/prune-skills 로 오래된 스킬을 미리보고 정리할 수 있습니다.".format(learned, cap),
+        )
+    parked = _parked_count()
+    return (
+        "[claude-code-self-improving-skills] 학습 스킬 {0}개가 상한 {1}개(SIS_MAX_LEARNED_SKILLS)를 "
+        "넘어 새 스킬 생성이 막혀 있습니다 — 백그라운드 증류는 기존 스킬 patch 만 하고, 새 기법은 "
+        "후보함({2})에 보관됩니다(현재 {3}건, /distill-status). 줄이려면 /prune-skills 로 미리보기 후 "
+        "정리하거나 /curate-skills 로 통합하고, 상한을 바꾸려면 SIS_MAX_LEARNED_SKILLS 를 조정하세요."
+        .format(learned, cap, os.path.join(STATE_DIR, "candidates"), parked),
+        "[self-improving-skills] 학습 스킬 {0}개로 상한 {1}개를 넘어 새 스킬이 만들어지지 않고 "
+        "후보함에만 쌓입니다(현재 {2}건). /prune-skills 로 정리하거나 SIS_MAX_LEARNED_SKILLS 를 "
+        "조정하세요.".format(learned, cap, parked),
+    )
+
+
+def _notify_user_today(key):
+    """True at most once per UTC day per key — the user-visible message
+    repeats daily while the state lasts, not on every session start."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    try:
+        with open(NOTICES, encoding="utf-8") as fh:
+            notices = json.load(fh)
+        if not isinstance(notices, dict):
+            notices = {}
+    except Exception:
+        notices = {}
+    if notices.get(key) == today:
+        return False
+    notices[key] = today
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(NOTICES, "w", encoding="utf-8") as fh:
+            json.dump(notices, fh)
+    except Exception:
+        pass
+    return True
+
+
 def _read_curator_state():
     try:
         with open(CURATOR_STATE, encoding="utf-8") as fh:
@@ -288,7 +377,7 @@ def _consolidation_status(learned_count):
     return "due" if (time.time() - last) >= interval else "idle"
 
 
-def _run_curator(state, lines):
+def _run_curator(state, lines, over_cap=False):
     """Run the deterministic time-based transition pass inline and report it."""
     summary = None
     try:
@@ -302,12 +391,28 @@ def _run_curator(state, lines):
     if summary:
         na, ns, nr = len(summary["archived"]), len(summary["stale"]), len(summary["reactivated"])
         state["last_summary"] = {"archived": na, "stale": ns, "reactivated": nr}
+        first_seen = summary.get("first_seen") or []
+        if first_seen:
+            agent = sum(1 for item in first_seen if item.get("created_by") == "agent")
+            lines.append(
+                "[큐레이터] 사용 기록이 없던 학습 스킬 {0}개(증류 스킬 {1}개)를 오늘부터 추적합니다 — "
+                "자동 정리는 오늘을 기준으로 나이를 세므로 당장 옮기는 스킬은 없습니다. 파일 나이로 미리보려면 "
+                "/prune-skills 를 쓰세요.".format(len(first_seen), agent)
+            )
         if na or ns or nr:
             lines.append(
                 "[큐레이터] 미사용 스킬 자동 정리 실행: stale {0}개, 아카이브 {1}개, 재활성화 {2}개. "
                 "아카이브된 스킬은 ~/.claude/skills/.archive/ 로 이동(삭제 아님, 하나씩은 /restore-skill, "
                 "이번 정리 전체를 되돌리려면 /curator-rollback). "
                 "세부 리포트는 ~/.claude/self-improve/logs/curator/.".format(ns, na, nr)
+            )
+        elif over_cap:
+            # "Nothing to clean" next to a full library reads as "all is well"
+            # — the 0.18.3 message did exactly that for three weeks.
+            lines.append(
+                "[큐레이터] 정기 점검 완료 — {0}일 미사용 기준에 걸린 스킬은 없지만, 라이브러리는 상한을 "
+                "넘은 상태입니다. 자동 정리만으로는 줄지 않으니 /prune-skills 로 직접 정리하세요."
+                .format(summary.get("archive_days", 45))
             )
         else:
             lines.append("[큐레이터] 정기 점검 완료 — 정리할 미사용 스킬이 없습니다.")
@@ -456,7 +561,21 @@ def main():
             "백그라운드 모드(기본)로 돌리면 이 위임 자체가 필요 없어집니다 — "
             "`claude setup-token` 후 ~/.claude/self-improve/worker.env 에 토큰을 넣으면 됩니다.",
         ]
-    if learned:
+    library = _library_status()
+    over_cap = False
+    system_message = None
+    if library is not None:
+        count, cap = library
+        if count:
+            lines.append("현재 학습된 스킬 {0}개가 ~/.claude/skills 에 누적되어 있습니다{1}.".format(
+                count, " (상한 {0}개)".format(cap) if cap > 0 else ""))
+        notice, message = _cap_notice(count, cap)
+        if notice:
+            lines.append(notice)
+            if _notify_user_today("library_cap"):
+                system_message = message
+        over_cap = count >= cap > 0
+    elif learned:
         lines.append("현재 학습된 스킬 {0}개가 ~/.claude/skills 에 누적되어 있습니다.".format(learned))
 
     reload_skills = False
@@ -476,7 +595,7 @@ def main():
             _write_curator_state({"last_run": now, "run_count": 0, "last_consolidation": now})
         else:
             if status == "due":
-                _run_curator(_read_curator_state(), lines)
+                _run_curator(_read_curator_state(), lines, over_cap=over_cap)
             if background and _consolidation_status(learned) == "due":
                 # Only in background mode: foreground/off means the user opted
                 # out of this plugin spawning child sessions, and a consolidation
@@ -485,7 +604,7 @@ def main():
     except Exception:
         pass
 
-    emit_context("\n".join(lines), reload_skills=reload_skills)
+    emit_context("\n".join(lines), reload_skills=reload_skills, system_message=system_message)
 
 
 # NOTE(v0.10.0): the always-on ~470-char permission-recovery hint that used to

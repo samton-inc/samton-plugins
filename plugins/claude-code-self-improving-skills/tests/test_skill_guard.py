@@ -411,6 +411,65 @@ def test_user_authored_skills_do_not_count_toward_the_cap(guard, sandbox, monkey
     assert [item["name"] for item in report["installed"]] == ["fresh-thing"]
 
 
+def test_a_user_owned_skill_with_the_marker_does_not_count_toward_the_cap(guard, sandbox, monkeypatch):
+    # The PostToolUse hook stamps the marker on a skill the user writes, and
+    # records created_by=user. No curator pass may archive or merge that
+    # skill, so counting it would build a cap nothing can bring back down.
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "1")
+    sandbox.make_skill("hand-stamped", PROV.format("hand-stamped", "mine"))
+    sandbox.usage_store.seed_if_missing("hand-stamped", created_by="user")
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "fresh-thing" / "SKILL.md", PROV.format("fresh-thing", "new"))
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["fresh-thing"]
+
+
+def test_a_cap_of_zero_turns_the_gate_off(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "0")
+    sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "third-thing" / "SKILL.md", PROV.format("third-thing", "third"))
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["third-thing"]
+
+
+# --- candidate notes ----------------------------------------------------------
+
+def test_a_reported_candidate_is_parked_as_a_note_under_a_safe_name(guard, sandbox):
+    path = guard.park_candidate_note(
+        "native-app-reset (or a section in ui-automation)", "library at its cap",
+        "add a reset section", job_id=7)
+    folder = _tray(sandbox) / "native-app-reset-or-a-section-in-ui-automation"
+    assert path == str(folder / "CANDIDATE.md")
+    text = (folder / "CANDIDATE.md").read_text(encoding="utf-8")
+    assert "distill job: 7" in text and "library at its cap" in text and "add a reset section" in text
+    assert guard.parked_candidates() == ["native-app-reset-or-a-section-in-ui-automation"]
+
+
+def test_a_candidate_name_cannot_climb_out_of_the_tray(guard, sandbox):
+    path = guard.park_candidate_note("../../outside", "r", "p")
+    assert path == str(_tray(sandbox) / "outside" / "CANDIDATE.md")
+    assert guard.park_candidate_note("///", "r", "p") == str(_tray(sandbox) / "candidate" / "CANDIDATE.md")
+
+
+def test_parking_the_same_note_twice_keeps_one_copy_and_a_new_one_never_overwrites(guard, sandbox):
+    first = guard.park_candidate_note("apt-dry-run", "cap", "add a section", job_id=1)
+    assert guard.park_candidate_note("apt-dry-run", "cap", "add a section", job_id=1) == first
+    second = guard.park_candidate_note("apt-dry-run", "cap", "a different proposal", job_id=2)
+    assert second != first and "a different proposal" not in open(first, encoding="utf-8").read()
+    assert len(list((_tray(sandbox) / "apt-dry-run").iterdir())) == 2
+
+
+def test_quarantined_skills_and_notes_are_listed_together(guard, sandbox, monkeypatch):
+    monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "1")
+    sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "third-thing" / "SKILL.md", PROV.format("third-thing", "third"))
+    guard.verify(before)
+    guard.park_candidate_note("noted-thing", "cap", "p")
+    assert guard.parked_candidates() == ["noted-thing", "third-thing"]
+
+
 # --- telemetry --------------------------------------------------------------
 
 def test_an_installed_skill_is_counted_once(guard, sandbox, store_data):
