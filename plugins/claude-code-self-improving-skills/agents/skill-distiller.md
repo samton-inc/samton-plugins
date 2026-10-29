@@ -74,9 +74,9 @@ non-obvious and would save time if it recurred?**
    that correction binds a whole class of task; (b) a skill loaded this session
    turned out wrong or stale and the fix does not fit inside it; (c) the technique
    is durable and class-level and no existing skill could hold it as a section.
-   Say in your report which bar was cleared. If the library is at its cap
-   (`SIS_MAX_LEARNED_SKILLS`, default 100 learned skills) do not create at all —
-   patch, or report the technique as a candidate for a human to place.
+   Say in your report which bar was cleared. If the user has set a library cap
+   (`SIS_MAX_LEARNED_SKILLS`; off by default) and the library is at it, do not
+   create at all — patch, or report the technique as a candidate for a human to place.
    **Before creating, check for collisions and overlap** — `ls ~/.claude/skills/`
    (and `~/.claude/skills/.archive/`). If a skill (or archived skill) of that name
    already exists, do NOT overwrite it: either patch the existing one (step 1) or

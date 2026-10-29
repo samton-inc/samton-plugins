@@ -92,6 +92,15 @@ def test_the_notice_counts_what_the_guard_counts(sandbox):
     assert "막혀 있습니다" not in context
 
 
+def test_without_a_configured_cap_there_is_no_cap_notice(sandbox, monkeypatch):
+    monkeypatch.delenv("SIS_MAX_LEARNED_SKILLS", raising=False)
+    _learned(sandbox, 3)
+    out = _init_raw(sandbox)
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert "현재 학습된 스킬 3개가 ~/.claude/skills 에 누적되어 있습니다." in context
+    assert "상한" not in context and "systemMessage" not in out
+
+
 def test_a_cap_of_zero_means_no_cap_notice(sandbox):
     _learned(sandbox, 3)
     out = _init_raw(sandbox, {"SIS_MAX_LEARNED_SKILLS": "0"})

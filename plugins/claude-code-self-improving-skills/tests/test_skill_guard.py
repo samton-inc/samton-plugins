@@ -424,6 +424,19 @@ def test_a_user_owned_skill_with_the_marker_does_not_count_toward_the_cap(guard,
     assert [item["name"] for item in report["installed"]] == ["fresh-thing"]
 
 
+def test_there_is_no_cap_unless_one_is_set(guard, sandbox, monkeypatch):
+    # 0.18.0 shipped a default of 100; 0.20.0 turned the default off. 101
+    # learned skills would have been refused under the old default.
+    monkeypatch.delenv("SIS_MAX_LEARNED_SKILLS", raising=False)
+    for i in range(101):
+        sandbox.make_skill("learned-{0}".format(i), PROV.format("learned-{0}".format(i), "topic {0}".format(i)))
+    before = guard.snapshot(str(sandbox.skills), str(sandbox.home))
+    _write(sandbox.skills / "fresh-thing" / "SKILL.md", PROV.format("fresh-thing", "new"))
+    report = guard.verify(before)
+    assert [item["name"] for item in report["installed"]] == ["fresh-thing"]
+    assert "candidates" not in report
+
+
 def test_a_cap_of_zero_turns_the_gate_off(guard, sandbox, monkeypatch):
     monkeypatch.setenv("SIS_MAX_LEARNED_SKILLS", "0")
     sandbox.make_skill("one-thing", PROV.format("one-thing", "first"))

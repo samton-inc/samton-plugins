@@ -343,7 +343,7 @@ def _new_skill_gate(name: str, text: str, inventory: List[skill_similarity.Skill
 
     Two deterministic checks the prompt used to ask for in prose:
       library_full      the library already holds SIS_MAX_LEARNED_SKILLS
-                        learned skills (default 100) — patch or candidate only
+                        learned skills (off unless set) — patch or candidate only
       too_similar_to    an existing skill's name or description overlaps this
                         one past SIS_DUP_NAME_JACCARD / SIS_DUP_DESC_JACCARD
     The skill just written is not in the pre-run inventory, so it cannot be its

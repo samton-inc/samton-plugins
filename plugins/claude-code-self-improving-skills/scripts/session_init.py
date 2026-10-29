@@ -5,7 +5,7 @@ Injects a small amount of additionalContext at session start so the agent:
   1. knows the self-improvement loop is active and how to feed it (the advisory
      nudge — Hermes' SKILLS_GUIDANCE analogue),
   2. is aware of how many learned skills already exist under ~/.claude/skills,
-     and — from 90% of SIS_MAX_LEARNED_SKILLS on — that new skills are about
+     and — when SIS_MAX_LEARNED_SKILLS is set, from 90% of it on — that new skills are about
      to be, or already are, refused (the user hears this too, once a day,
      through systemMessage), and
   3. is reminded to run /curate-skills when the learned-skill library has grown
@@ -23,7 +23,7 @@ Config:
   SIS_CURATE_MAX_JOBS    consolidation cluster jobs queued per pass (default 5)
   SIS_COMPRESS_MAX_JOBS  description-compression batch jobs queued per pass (default 6)
   SIS_AUTO_CURATE        "0" turns the background library passes off
-  SIS_MAX_LEARNED_SKILLS the library cap the notice compares against (default 100)
+  SIS_MAX_LEARNED_SKILLS the library cap the notice compares against (default 0 = no cap, no notice)
 
 Two clocks since 0.18.0. The time-based transitions are free and deterministic,
 so they run daily; the LLM passes (consolidation clusters, compression batches)
