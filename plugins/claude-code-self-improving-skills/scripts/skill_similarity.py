@@ -247,8 +247,12 @@ def learned_count(inventory: Sequence[SkillFacts]) -> int:
 
 
 def library_cap() -> int:
-    """SIS_MAX_LEARNED_SKILLS; 0 or less turns the cap off."""
-    return skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 100)
+    """SIS_MAX_LEARNED_SKILLS; 0 or less turns the cap off, and off is the
+    default since 0.20.0. The 100-skill default of 0.18.0 refused every new
+    skill for three weeks while the write-nothing prompt, the duplicate gate
+    and (from 0.19.0) the tracked idle archive already kept growth in check —
+    the cap stays as an opt-in for a library that needs a hard ceiling."""
+    return skill_paths.int_env("SIS_MAX_LEARNED_SKILLS", 0)
 
 
 def at_cap(count: int, cap: Optional[int] = None) -> bool:
